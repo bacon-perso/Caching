@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Bacon.Caching.Samples/Bacon.Caching.Samples.csproj" Id="054fc5f6-7bd8-4eeb-bb85-42b90d8f4978" />
+  <Project Path="Bacon.Caching.Tests/Bacon.Caching.Tests.csproj" />
+  <Project Path="Bacon.Caching/Bacon.Caching.csproj" />
+</Solution>
