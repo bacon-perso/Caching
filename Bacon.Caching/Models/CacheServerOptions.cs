@@ -1,35 +1,36 @@
-﻿using Bacon.Caching.Interfaces.Models;
+using Bacon.Caching.Interfaces.Models;
 using Microsoft.Extensions.Logging;
 
 namespace Bacon.Caching.Models;
 
 /// <summary>
-/// Options loading the caching middleware
+/// Global options of the caching library.
 /// </summary>
 public sealed class CacheServerOptions
 {
     /// <summary>
-    /// Containes the environement instance ID. Can be passed here in a single tenant environment. Can also be overriden in each individual function in case of multi-tenancy
+    /// The global tenant ID, used when no tenant ID is passed to a call. Typically set in a single-tenant environment; in a multi-tenant environment it can be overridden on each call.
+    /// Must be 1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':'.
     /// </summary>
     public string? TenantId { get; set; }
 
     /// <summary>
-    /// The type of distrubuted cache. Defaults to none, or memory cache
+    /// The type of distributed cache. Defaults to none (memory cache only).
     /// </summary>
     public DistributedCacheTypes DistributedCacheType { get; set; } = DistributedCacheTypes.none;
 
     /// <summary>
-    /// Allows to log connection events, such as disconnects, reconnects, server errors. If not set (or null), then no connection events will be logged. (Default value is null)
+    /// Logger factory passed to the distributed cache connection to log connection events, such as disconnects, reconnects and server errors. If null (default), no connection events are logged.
     /// </summary>
     public ILoggerFactory? LoggerFactory { get; set; }
 
     /// <summary>
-    /// The distributed health check options. If the option is null, no health will be done. Otherwise, the healthcheck will only work if distributed cache is used and the configurations are valid (default value : null)
+    /// The distributed health check options. If null (default), no health check is registered. The health check is only registered when a distributed cache is configured.
     /// </summary>
     public DistributedHealthCheckOptions? HealthCheckOptions { get; set; }
 
     /// <summary>
-    /// Defines the distributed cache options
+    /// The options of the distributed cache selected by <see cref="DistributedCacheType"/> (<see cref="RedisCacheOptions"/> for redis). Required when a distributed cache type is selected.
     /// </summary>
     public IDistributedCacheOptions? DistributedCacheOptions { get; set; }
 }

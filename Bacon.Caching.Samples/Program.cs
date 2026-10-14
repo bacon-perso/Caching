@@ -21,7 +21,7 @@ webApplicationBuilder.Services.AddControllers();
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 webApplicationBuilder.Services.AddOpenApi();
 
-string tenantId = webApplicationBuilder.Configuration.GetSection("CacheSettings")["RedisSettings:Server"]!;
+string tenantId = Constants.TenantId;
 string redisServer = webApplicationBuilder.Configuration.GetSection("CacheSettings")["RedisSettings:Server"]!;
 ushort redisPort = Convert.ToUInt16(webApplicationBuilder.Configuration.GetSection("CacheSettings")["RedisSettings:Port"]!);
 string redisPassword = webApplicationBuilder.Configuration.GetSection("CacheSettings")["RedisSettings:Password"]!;

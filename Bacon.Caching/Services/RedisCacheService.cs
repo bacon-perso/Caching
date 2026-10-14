@@ -2,7 +2,6 @@
 using Bacon.Caching.Models;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
-using System.Collections.Concurrent;
 
 namespace Bacon.Caching.Services;
 
@@ -16,12 +15,11 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
 
     #region Get
 
-    public async Task<TItem?> GetItemAsync(string key)
+    public async Task<TItem?> GetAsync(string key, CancellationToken cancellationToken = default)
     {
-        if (!connectionMultiplexer.IsConnected)
-        {
-            throw new RedisConnectionException(ConnectionFailureType.UnableToConnect, "Error while getting redis item");
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+
+        ValidateIsConnected("Error while getting redis item");
 
         RedisValue redisValue = await database.StringGetAsync(key, CommandFlags.None);
 
@@ -33,21 +31,50 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
         return cacheSerializerService.Deserialize<TItem?>(redisValue.ToString());
     }
 
-    public async Task<Dictionary<string, TItem?>> GetItemsAsync(IEnumerable<string> keys)
+    public async Task<Dictionary<string, TItem?>> GetItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
     {
-        if (!connectionMultiplexer.IsConnected)
+        cancellationToken.ThrowIfCancellationRequested();
+
+        ValidateIsConnected("Error while getting redis items");
+
+        string[] cacheKeys = [.. keys];
+        TItem?[] values = new TItem?[cacheKeys.Length];
+
+        int batchSize = _redisCacheOptions.GetBatchSize;
+        int batchCount = (cacheKeys.Length + batchSize - 1) / batchSize;
+
+        ParallelOptions parallelOptions = new()
         {
-            throw new RedisConnectionException(ConnectionFailureType.UnableToConnect, "Error while getting redis items");
-        }
+            MaxDegreeOfParallelism = 2,
+            CancellationToken = cancellationToken
+        };
 
-        RedisValue[] redisValues = await database.StringGetAsync([.. keys.Select(s => new RedisKey(s))], CommandFlags.None);
-
-        Dictionary<string, TItem?> returnValues = [];
-        for (int idx = 0; idx < redisValues.Length; ++idx)
+        await Parallel.ForEachAsync(Enumerable.Range(0, batchCount), parallelOptions, async (batchIndex, _) =>
         {
-            TItem? value = redisValues[idx].HasValue ? cacheSerializerService.Deserialize<TItem>(redisValues[idx].ToString()) : default;
+            int start = batchIndex * batchSize;
+            int length = Math.Min(batchSize, cacheKeys.Length - start);
 
-            returnValues.Add(keys.ElementAt(idx), value);
+            RedisKey[] redisKeys = new RedisKey[length];
+            for (int idx = 0; idx < length; ++idx)
+            {
+                redisKeys[idx] = cacheKeys[start + idx];
+            }
+
+            RedisValue[] redisValues = await database.StringGetAsync(redisKeys, CommandFlags.None);
+
+            for (int idx = 0; idx < redisValues.Length; ++idx)
+            {
+                if (redisValues[idx].HasValue)
+                {
+                    values[start + idx] = cacheSerializerService.Deserialize<TItem>(redisValues[idx].ToString());
+                }
+            }
+        });
+
+        Dictionary<string, TItem?> returnValues = new(cacheKeys.Length);
+        for (int idx = 0; idx < cacheKeys.Length; ++idx)
+        {
+            returnValues.Add(cacheKeys[idx], values[idx]);
         }
 
         return returnValues;
@@ -57,174 +84,92 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
 
     #region Set
 
-    public async Task SetItemAsync(string key, TItem value, TimeSpan cacheDuration)
+    public async Task SetAsync(string key, TItem value, TimeSpan cacheDuration, CancellationToken cancellationToken = default)
     {
-        if (!connectionMultiplexer.IsConnected)
-        {
-            throw new RedisConnectionException(ConnectionFailureType.UnableToConnect, "Error while setting redis item");
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+
+        ValidateIsConnected("Error while setting redis item");
 
         await database.StringSetAsync(key, cacheSerializerService.Serialize(value), cacheDuration, flags: CommandFlags.FireAndForget);
     }
 
-    public async Task SetItemsAsync(IDictionary<string, TItem> items, TimeSpan cacheDuration)
+    public async Task SetItemsAsync(IDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default)
     {
-        if (!connectionMultiplexer.IsConnected)
-        {
-            throw new RedisConnectionException(ConnectionFailureType.UnableToConnect, "Error while setting redis items");
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+
+        ValidateIsConnected("Error while setting redis items");
 
         ParallelOptions parallelOptions = new()
         {
-            MaxDegreeOfParallelism = 2
+            MaxDegreeOfParallelism = 2,
+            CancellationToken = cancellationToken
         };
 
-        ConcurrentDictionary<int, List<KeyValuePair<string, TItem>>> concurrentDic = new();
-
-        //insert the items in batch using parallelism
-        Parallel.ForEach(items, parallelOptions, kv =>
+        await Parallel.ForEachAsync(items.Chunk(_redisCacheOptions.InsertBatchSize), parallelOptions, async (batch, _) =>
         {
-            int currentThreadId = Environment.CurrentManagedThreadId;
-
-            if (!concurrentDic.ContainsKey(currentThreadId))
-            {
-                concurrentDic.TryAdd(currentThreadId, []);
-            }
-
-            KeyValuePair<string, TItem> keyValuePair = new(kv.Key, kv.Value);
-
-            concurrentDic[currentThreadId].Add(keyValuePair);
-
-            if (concurrentDic[currentThreadId].Count % _redisCacheOptions.InsertBatchSize == 0)
-            {
-                AddAllAsync(concurrentDic[currentThreadId], cacheDuration);
-                concurrentDic[currentThreadId].Clear();
-            }
+            await AddAllAsync(batch, cacheDuration);
         });
-
-        //insert the remaining items that did not fit in a batch
-        Parallel.ForEach(concurrentDic, parallelOptions, kv =>
-        {
-            if (kv.Value.Count != 0)
-            {
-                AddAllAsync(kv.Value, cacheDuration);
-                kv.Value.Clear();
-            }
-        });
-
-        await Task.CompletedTask;
     }
 
     #endregion Set
 
     #region Remove
 
-    public async Task RemoveItemAsync(string key)
+    public async Task RemoveAsync(string key, CancellationToken cancellationToken = default)
     {
-        if (!connectionMultiplexer.IsConnected)
-        {
-            throw new RedisConnectionException(ConnectionFailureType.UnableToConnect, "Error while removing redis item");
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+
+        ValidateIsConnected("Error while removing redis item");
 
         await database.KeyDeleteAsync(key);
     }
 
-    public async Task RemoveItemsAsync(IEnumerable<string> keys)
+    public async Task RemoveItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
     {
-        if (!connectionMultiplexer.IsConnected)
-        {
-            throw new RedisConnectionException(ConnectionFailureType.UnableToConnect, "Error while removing redis items");
-        }
+        cancellationToken.ThrowIfCancellationRequested();
 
-        int count = keys.Count();
+        ValidateIsConnected("Error while removing redis items");
 
-        if (count == 0)
+        RedisKey[] redisKeys = [.. keys.Select(s => (RedisKey)s)];
+
+        if (redisKeys.Length == 0)
         {
             return;
         }
 
-        RedisKey[] redisKeys = new RedisKey[count];
-
-        for (int idx = 0; idx < count; ++idx)
+        ParallelOptions parallelOptions = new()
         {
-            redisKeys[idx] = keys.ElementAt(idx);
-        }
+            MaxDegreeOfParallelism = 2,
+            CancellationToken = cancellationToken
+        };
 
-        await database.KeyDeleteAsync(redisKeys);
+        await Parallel.ForEachAsync(redisKeys.Chunk(_redisCacheOptions.RemoveBatchSize), parallelOptions, async (batch, _) =>
+        {
+            await database.KeyDeleteAsync(batch);
+        });
     }
 
     #endregion Remove
 
-    #region Flush
-
-    public async Task FlushItemsAsync(string keyPattern)
-    {
-        if (!connectionMultiplexer.IsConnected)
-        {
-            throw new RedisConnectionException(ConnectionFailureType.UnableToConnect, "Error while flusing redis items");
-        }
-
-        // Lua script to delete keys
-        string script = $@"
-local cursor = 0
-local keyNum = 0  
-repeat
-   local res = redis.call('scan',cursor,'MATCH',@key,'COUNT',{_redisCacheOptions.FlushBatchSize})
-   if(res ~= nil and #res>=0) 
-   then
-      cursor = tonumber(res[1])
-      local ks = res[2]
-      if(ks ~= nil and #ks>0) 
-      then
-         for i=1,#ks,1 do
-            local key = tostring(ks[i])
-            redis.call('DEL',key)
-         end
-         keyNum = keyNum + #ks
-      end
-     end
-until( cursor <= 0 )
-return keyNum
-";
-
-        IServer server = connectionMultiplexer.GetServer($"{_redisCacheOptions.Server}:{_redisCacheOptions.Port}");
-
-        LuaScript preparedScript = LuaScript.Prepare(script);
-        LoadedLuaScript loaded = await preparedScript.LoadAsync(server);
-        await loaded.EvaluateAsync(database, new { key = keyPattern });
-    }
-
-    #endregion Flush
-
     #region Privates
 
-    private async void AddAllAsync(IEnumerable<KeyValuePair<string, TItem>> items, TimeSpan cacheDuration)
+    private async Task AddAllAsync(IEnumerable<KeyValuePair<string, TItem>> items, TimeSpan cacheDuration)
     {
-        CommandFlags commandFlags = CommandFlags.FireAndForget;
-        When when = When.Always;
-
-        KeyValuePair<RedisKey, RedisValue>[] values = SerializeIterations(items);
-
-        Task[] tasks = new Task[values.Length];
-        await database.StringSetAsync(values, when: when, flags: commandFlags);
-
-        for (int idx = 0; idx < values.Length; ++idx)
+        List<Task> tasks = [];
+        foreach (KeyValuePair<string, TItem> item in items)
         {
-            tasks[idx] = database.KeyExpireAsync(values[idx].Key, cacheDuration, commandFlags);
+            tasks.Add(database.StringSetAsync(item.Key, cacheSerializerService.Serialize(item.Value), cacheDuration, when: When.Always, flags: CommandFlags.FireAndForget));
         }
 
         await Task.WhenAll(tasks);
     }
 
-    private KeyValuePair<RedisKey, RedisValue>[] SerializeIterations(IEnumerable<KeyValuePair<string, TItem>> items)
+    private void ValidateIsConnected(string message)
     {
-        List<KeyValuePair<RedisKey, RedisValue>> redisValues = [];
-        foreach (KeyValuePair<string, TItem> item in items)
+        if (!connectionMultiplexer.IsConnected)
         {
-            redisValues.Add(new(new(item.Key), new(cacheSerializerService.Serialize(item.Value))));
+            throw new RedisConnectionException(ConnectionFailureType.UnableToConnect, CommandFlags.None, message);
         }
-
-        return [.. redisValues];
     }
 
     #endregion Privates

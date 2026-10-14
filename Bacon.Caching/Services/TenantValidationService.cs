@@ -8,7 +8,7 @@ internal static partial class TenantValidationService
     {
         if (!TenantValidationRegex().IsMatch(tenantId))
         {
-            throw new ArgumentException("Caching - The tenant ID cannot be longer than 50 characters and only supports the following characters ('A-Z', 'a-z', '0-9', '.', '_', '-', ':'", nameof(tenantId));
+            throw new ArgumentException("Caching - The tenant ID cannot be longer than 50 characters and only supports the following characters ('A-Z', 'a-z', '0-9', '.', '_', '-', ':')", nameof(tenantId));
         }
     }
 

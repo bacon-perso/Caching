@@ -1,406 +1,153 @@
-﻿namespace Bacon.Caching.Interfaces.Services;
+using System.Runtime.CompilerServices;
+
+namespace Bacon.Caching.Interfaces.Services;
 
 /// <summary>
-/// Cache service interface
+/// Dual-layer (memory and distributed) cache service for items of type <typeparamref name="TItem"/>.
 /// </summary>
+/// <typeparam name="TItem">The type of the cached items.</typeparam>
+/// <remarks>
+/// Reads check the memory cache first, then fall back to the distributed cache and backfill the memory cache on a hit.
+/// Writes and removals are applied to both layers. A layer is disabled for a type when its duration is <see cref="TimeSpan.Zero"/>.
+/// Failures of either layer (for example an unreachable distributed cache) are logged and are not thrown to the caller.
+/// The cache key has the format <c>{tenantId}_{CacheKey}{suffix}</c>.
+/// </remarks>
 public interface ICacheService<TItem>
 {
     #region Get
 
-    #region Items
+    /// <summary>
+    /// Gets the item cached without a suffix (the cache key is <c>{tenantId}_{CacheKey}</c>), for example a configuration object.
+    /// </summary>
+    /// <param name="tenantId">Optional tenant ID that overrides the global tenant. Required when no global tenant is configured (multi-tenancy).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The cached item, or null/default if not present.</returns>
+    /// <remarks>
+    /// Because <paramref name="tenantId"/> is a string, a positional string argument (for example <c>GetAsync("abc")</c>) is treated as a cache key suffix.
+    /// To pass only a tenant ID, name the argument: <c>GetAsync(tenantId: "abc")</c>.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">No tenant ID was passed and no global tenant ID is configured.</exception>
+    /// <exception cref="ArgumentException">The tenant ID is empty or invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
+    ValueTask<TItem?> GetAsync(string? tenantId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Get a single item from the cache
+    /// Gets a single item from the cache using its cache key suffix.
     /// </summary>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <returns>Object returned, null/default if not present</returns>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task<TItem?> GetItemAsync(string? tenantId = null);
+    /// <typeparam name="TSuffix">The type of the cache key suffix, for example <see cref="Guid"/>, <see cref="string"/> or <see cref="int"/>. The suffix is converted with <c>ToString()</c> to build the cache key, so custom types must override it with a deterministic value.</typeparam>
+    /// <param name="cacheKeySuffix">The cache key suffix, for example the identifier of the item. Cannot be null.</param>
+    /// <param name="tenantId">Optional tenant ID that overrides the global tenant. Required when no global tenant is configured (multi-tenancy).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The cached item, or null/default if not present.</returns>
+    /// <exception cref="ArgumentNullException">The cache key suffix is null, or no tenant ID was passed and no global tenant ID is configured.</exception>
+    /// <exception cref="ArgumentException">The tenant ID is empty or invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
+    [OverloadResolutionPriority(1)]
+    ValueTask<TItem?> GetAsync<TSuffix>(TSuffix cacheKeySuffix, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull;
 
     /// <summary>
-    /// Get a single item from the cache
+    /// Gets several items from the cache using their cache key suffixes.
     /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffix">The cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <returns>Object returned, null/default if not present</returns>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task<TItem?> GetItemAsync<TSuffix>(TSuffix cacheKeySuffix, string? tenantId = null) where TSuffix : notnull;
-
-    /// <summary>
-    /// Gets a list of items from the cache using their cache key suffix
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffixes">A collection of cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <returns>A dictionary containing the objects cached : Key : suffix received, Value : object returned, null/default if not present</returns>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    /// <exception cref="ArgumentNullException">The cacheKeySuffixes cannot be null</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot be empty</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot contain an empty suffix</exception>
-    Task<IDictionary<TSuffix, TItem?>> GetItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null) where TSuffix : notnull;
-
-    #endregion Items
-
-    #region Distributed
-
-    /// <summary>
-    /// Get a single item from the Distributed cache
-    /// </summary>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <returns>Object returned, null/default if not present</returns>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task<TItem?> GetDistributedItemAsync(string? tenantId = null);
-
-    /// <summary>
-    /// Get a single item from the Distributed cache
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffix">The cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <returns>Object returned, null/default if not present</returns>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task<TItem?> GetDistributedItemAsync<TSuffix>(TSuffix cacheKeySuffix, string? tenantId = null) where TSuffix : notnull;
-
-    /// <summary>
-    /// Gets a list of items from the Distributed cache using their cache key suffix
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffixes">A collection of cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <returns>A dictionary containing the objects cached : Key : suffix received, Value : object returned, null/default if not present</returns>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    /// <exception cref="ArgumentNullException">The cacheKeySuffixes cannot be null</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot be empty</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot contain an empty suffix</exception>
-    Task<IDictionary<TSuffix, TItem?>> GetDistributedItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null) where TSuffix : notnull;
-
-    #endregion Distributed
-
-    #region Memory
-
-    /// <summary>
-    /// Get a single item from the memory cache
-    /// </summary>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <returns>Object returned, null/default if not present</returns>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    TItem? GetMemoryItem(string? tenantId = null);
-
-    /// <summary>
-    /// Get a single item from the memory cache
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffix">The cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <returns>Object returned, null/default if not present</returns>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    TItem? GetMemoryItem<TSuffix>(TSuffix cacheKeySuffix, string? tenantId = null) where TSuffix : notnull;
-
-    /// <summary>
-    /// Get a list of items from the memory cache
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffixes">A collection of cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <returns>A dictionary containing the objects cached : Key : suffix received, Value : object returned, null/default if not present</returns>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="ArgumentNullException">The cacheKeySuffixes cannot be null</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot be empty</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot contain an empty suffix</exception>
-    IDictionary<TSuffix, TItem?> GetMemoryItems<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null) where TSuffix : notnull;
-
-    #endregion Memory
+    /// <typeparam name="TSuffix">The type of the cache key suffix, for example <see cref="Guid"/>, <see cref="string"/> or <see cref="int"/>. The suffix is converted with <c>ToString()</c> to build the cache key, so custom types must override it with a deterministic value.</typeparam>
+    /// <param name="cacheKeySuffixes">The cache key suffixes, for example the identifiers of the items. Duplicates are ignored.</param>
+    /// <param name="tenantId">Optional tenant ID that overrides the global tenant. Required when no global tenant is configured (multi-tenancy).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A dictionary containing one entry per distinct suffix received: the key is the suffix, the value is the cached item, or null/default if not present.</returns>
+    /// <exception cref="ArgumentNullException">The cache key suffixes are null, or no tenant ID was passed and no global tenant ID is configured.</exception>
+    /// <exception cref="ArgumentException">The cache key suffixes are empty, contain a null value or a value whose string representation is empty or whitespace, or the tenant ID is empty or invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
+    ValueTask<IDictionary<TSuffix, TItem?>> GetItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull;
 
     #endregion Get
 
     #region Set
 
-    #region Items
+    /// <summary>
+    /// Adds an item to the memory and distributed cache without a suffix (the cache key is <c>{tenantId}_{CacheKey}</c>), for example a configuration object.
+    /// </summary>
+    /// <param name="item">The object to cache. Cannot be null.</param>
+    /// <param name="tenantId">Optional tenant ID that overrides the global tenant. Required when no global tenant is configured (multi-tenancy).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <remarks>
+    /// Because <paramref name="tenantId"/> is a string, a positional string argument (for example <c>SetAsync(item, "abc")</c>) is treated as a cache key suffix.
+    /// To pass only a tenant ID, name the argument: <c>SetAsync(item, tenantId: "abc")</c>.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">The item is null, or no tenant ID was passed and no global tenant ID is configured.</exception>
+    /// <exception cref="ArgumentException">The tenant ID is empty or invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
+    ValueTask SetAsync(TItem item, string? tenantId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Add an item to both the memory and distributed cache using it's key suffix
+    /// Adds an item to the memory and distributed cache using its cache key suffix.
     /// </summary>
-    /// <param name="item">The object to cache</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task SetItemAsync(TItem item, string? tenantId = null);
+    /// <typeparam name="TSuffix">The type of the cache key suffix, for example <see cref="Guid"/>, <see cref="string"/> or <see cref="int"/>. The suffix is converted with <c>ToString()</c> to build the cache key, so custom types must override it with a deterministic value.</typeparam>
+    /// <param name="item">The object to cache. Cannot be null.</param>
+    /// <param name="cacheKeySuffix">The cache key suffix, for example the identifier of the item. Cannot be null.</param>
+    /// <param name="tenantId">Optional tenant ID that overrides the global tenant. Required when no global tenant is configured (multi-tenancy).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <exception cref="ArgumentNullException">The item or the cache key suffix is null, or no tenant ID was passed and no global tenant ID is configured.</exception>
+    /// <exception cref="ArgumentException">The tenant ID is empty or invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
+    [OverloadResolutionPriority(1)]
+    ValueTask SetAsync<TSuffix>(TItem item, TSuffix cacheKeySuffix, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull;
 
     /// <summary>
-    /// Add an item to both the memory and distributed cache using it's key suffix
+    /// Adds several items to the memory and distributed cache.
     /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="item">The object to cache</param>
-    /// <param name="cacheKeySuffix">The cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task SetItemAsync<TSuffix>(TItem item, TSuffix cacheKeySuffix, string? tenantId = null) where TSuffix : notnull;
-
-    /// <summary>
-    /// Add a list of items to both the memory and distributed cache
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="items">Dictionary containing objects to cache. Key : cache key suffix, Value : object to cache</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    /// <exception cref="ArgumentNullException">The items cannot be null</exception>
-	/// <exception cref="ArgumentException">The items cannot be empty</exception>
-    Task SetItemsAsync<TSuffix>(IDictionary<TSuffix, TItem> items, string? tenantId = null) where TSuffix : notnull;
-
-    #endregion Items
-
-    #region Distributed
-
-    /// <summary>
-    /// Add an item to the distributed cache using it's key suffix
-    /// </summary>
-    /// <param name="item">The object to cache</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task SetDistributedItemAsync(TItem item, string? tenantId = null);
-
-    /// <summary>
-    /// Add an item to the distributed cache using it's key suffix
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="item">The object to cache</param>
-    /// <param name="cacheKeySuffix">The cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task SetDistributedItemAsync<TSuffix>(TItem item, TSuffix cacheKeySuffix, string? tenantId = null) where TSuffix : notnull;
-
-    /// <summary>
-    /// Add a list of items to the distributed cache
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="items">Dictionary containing objects to cache. Key : cache key suffix, Value : object to cache</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    /// <exception cref="ArgumentNullException">The items cannot be null</exception>
-	/// <exception cref="ArgumentException">The items cannot be empty</exception>
-    Task SetDistributedItemsAsync<TSuffix>(IDictionary<TSuffix, TItem> items, string? tenantId = null) where TSuffix : notnull;
-
-    #endregion Distributed
-
-    #region Memory
-
-    /// <summary>
-    /// Add an item to the memory cache
-    /// </summary>
-    /// <param name="item">The object to cache</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    void SetMemoryItem(TItem item, string? tenantId = null);
-
-    /// <summary>
-    /// Add an item to the memory cache
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="item">The object to cache</param>
-    /// <param name="cacheKeySuffix">The cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    void SetMemoryItem<TSuffix>(TItem item, TSuffix cacheKeySuffix, string? tenantId = null) where TSuffix : notnull;
-
-    /// <summary>
-    /// Add a list of items to the memory cache
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="items">Dictionary containing objects to cache. Key : cache key suffix, Value : object to cache</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="ArgumentNullException">The items cannot be null</exception>
-    /// <exception cref="ArgumentException">The items cannot be empty</exception>
-    void SetMemoryItems<TSuffix>(IDictionary<TSuffix, TItem> items, string? tenantId = null) where TSuffix : notnull;
-
-    #endregion Memory
+    /// <typeparam name="TSuffix">The type of the cache key suffix, for example <see cref="Guid"/>, <see cref="string"/> or <see cref="int"/>. The suffix is converted with <c>ToString()</c> to build the cache key, so custom types must override it with a deterministic value.</typeparam>
+    /// <param name="items">The objects to cache. Key: cache key suffix, Value: object to cache (cannot be null).</param>
+    /// <param name="tenantId">Optional tenant ID that overrides the global tenant. Required when no global tenant is configured (multi-tenancy).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <exception cref="ArgumentNullException">The items are null, one of the values is null, or no tenant ID was passed and no global tenant ID is configured.</exception>
+    /// <exception cref="ArgumentException">The items are empty, a key is null or its string representation is empty or whitespace, or the tenant ID is empty or invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
+    ValueTask SetItemsAsync<TSuffix>(IDictionary<TSuffix, TItem> items, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull;
 
     #endregion Set
 
     #region Remove
 
-    #region Items
+    /// <summary>
+    /// Removes the item cached without a suffix (the cache key is <c>{tenantId}_{CacheKey}</c>) from the memory and distributed cache.
+    /// </summary>
+    /// <param name="tenantId">Optional tenant ID that overrides the global tenant. Required when no global tenant is configured (multi-tenancy).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <remarks>
+    /// Because <paramref name="tenantId"/> is a string, a positional string argument (for example <c>RemoveAsync("abc")</c>) is treated as a cache key suffix.
+    /// To pass only a tenant ID, name the argument: <c>RemoveAsync(tenantId: "abc")</c>.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">No tenant ID was passed and no global tenant ID is configured.</exception>
+    /// <exception cref="ArgumentException">The tenant ID is empty or invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
+    ValueTask RemoveAsync(string? tenantId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Remove a an item from the memory and distributed cache
+    /// Removes an item from the memory and distributed cache using its cache key suffix.
     /// </summary>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task RemoveItemAsync(string? tenantId = null);
+    /// <typeparam name="TSuffix">The type of the cache key suffix, for example <see cref="Guid"/>, <see cref="string"/> or <see cref="int"/>. The suffix is converted with <c>ToString()</c> to build the cache key, so custom types must override it with a deterministic value.</typeparam>
+    /// <param name="cacheKeySuffix">The cache key suffix, for example the identifier of the item. Cannot be null.</param>
+    /// <param name="tenantId">Optional tenant ID that overrides the global tenant. Required when no global tenant is configured (multi-tenancy).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <exception cref="ArgumentNullException">The cache key suffix is null, or no tenant ID was passed and no global tenant ID is configured.</exception>
+    /// <exception cref="ArgumentException">The tenant ID is empty or invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
+    [OverloadResolutionPriority(1)]
+    ValueTask RemoveAsync<TSuffix>(TSuffix cacheKeySuffix, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull;
 
     /// <summary>
-    /// Remove a an item from the memory and distributed cache from it's suffix
+    /// Removes several items from the memory and distributed cache using their cache key suffixes.
     /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffix">The cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task RemoveItemAsync<TSuffix>(TSuffix cacheKeySuffix, string? tenantId = null) where TSuffix : notnull;
-
-    /// <summary>
-    /// Remove a list of items from the memory and distributed cache from their suffixes
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffixes">A collection of cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    /// <exception cref="ArgumentNullException">The cacheKeySuffixes cannot be null</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot be empty</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot contain an empty suffix</exception>
-    Task RemoveItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null) where TSuffix : notnull;
-
-    #endregion Items
-
-    #region Distributed
-
-    /// <summary>
-    /// Remove a an item from the distributed cache
-    /// </summary>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task RemoveDistributedItemAsync(string? tenantId = null);
-
-    /// <summary>
-    /// Remove a an item from the distributed cache from it's suffix
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffix">The cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task RemoveDistributedItemAsync<TSuffix>(TSuffix cacheKeySuffix, string? tenantId = null) where TSuffix : notnull;
-
-    /// <summary>
-    /// Remove a list of items from the distributed cache from their suffixes
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffixes">A collection of cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    /// <exception cref="ArgumentNullException">The cacheKeySuffixes cannot be null</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot be empty</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot contain an empty suffix</exception>
-    Task RemoveDistributedItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null) where TSuffix : notnull;
-
-    #endregion Distributed
-
-    #region Memory
-
-    /// <summary>
-    /// Remove a an item from the memory cache
-    /// </summary>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    void RemoveMemoryItem(string? tenantId = null);
-
-    /// <summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// Remove a an item from the memory cache from it's suffix
-    /// </summary>
-    /// <param name="cacheKeySuffix">The cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    void RemoveMemoryItem<TSuffix>(TSuffix cacheKeySuffix, string? tenantId = null) where TSuffix : notnull;
-
-    /// <summary>
-    /// Remove a list of items from the memory cache from their suffixes
-    /// </summary>
-    /// <typeparam name="TSuffix">The typeof for the suffix. IE: Guid, string, int, etc..</typeparam>
-    /// <param name="cacheKeySuffixes">A collection of cache key suffix. IE : Could be a specific id</param>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="ArgumentNullException">The cacheKeySuffixes cannot be null</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot be empty</exception>
-    /// <exception cref="ArgumentException">The cacheKeySuffixes cannot contain an empty suffix</exception>
-    void RemoveMemoryItems<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null) where TSuffix : notnull;
-
-    #endregion Memory
+    /// <typeparam name="TSuffix">The type of the cache key suffix, for example <see cref="Guid"/>, <see cref="string"/> or <see cref="int"/>. The suffix is converted with <c>ToString()</c> to build the cache key, so custom types must override it with a deterministic value.</typeparam>
+    /// <param name="cacheKeySuffixes">The cache key suffixes, for example the identifiers of the items. Duplicates are ignored.</param>
+    /// <param name="tenantId">Optional tenant ID that overrides the global tenant. Required when no global tenant is configured (multi-tenancy).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <remarks>
+    /// The removal from the distributed cache is done in batches, so a failure part-way through can leave some keys removed and others not. The error is logged, and the memory cache is still cleared for every key.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">The cache key suffixes are null, or no tenant ID was passed and no global tenant ID is configured.</exception>
+    /// <exception cref="ArgumentException">The cache key suffixes are empty, contain a null value or a value whose string representation is empty or whitespace, or the tenant ID is empty or invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
+    ValueTask RemoveItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull;
 
     #endregion Remove
-
-    #region Flush
-
-    #region Items
-
-    /// <summary>
-    /// Flush items matching the key from the distributed and memory cache
-    /// </summary>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task FlushItemsAsync(string? tenantId = null);
-
-    #endregion Items
-
-    #region Distributed
-
-    /// <summary>
-    /// Flush items matching the key from the distributed cache
-    /// </summary>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    /// <exception cref="InvalidOperationException">Distributed Cache not initialized</exception>
-    Task FlushDistributedItemsAsync(string? tenantId = null);
-
-    #endregion Distributed
-
-    #region Memory
-
-    /// <summary>
-    /// Flush items matching the key from the memory cache
-    /// </summary>
-    /// <param name="tenantId">Optional tenantId that overrides the global setting. Required for multi-tenancy.</param>
-    /// <exception cref="ArgumentNullException">The tenant ID cannot be null</exception>
-    /// <exception cref="ArgumentException">The tenant ID cannot be empty</exception>
-    void FlushMemoryItems(string? tenantId = null);
-
-    #endregion Memory
-
-    #endregion Flush
 }

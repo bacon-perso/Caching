@@ -14,27 +14,32 @@ namespace Bacon.Caching.Extensions;
 /// </summary>
 public static class CacheExtensions
 {
+    private static readonly ushort _maxBatchSize = 5_000;
+
     #region Extensions
 
     /// <summary>
-    /// Add cache middleware
+    /// Registers the caching services: the memory cache and, when configured, the distributed cache.
     /// </summary>
-    /// <param name="services">The service collections</param>
-    /// <param name="options">The cache server options</param>
-    /// <exception cref="ArgumentNullException">CacheKeyPrefix cannot be null or empty.</exception>
-    /// <exception cref="ArgumentException">MemoryCacheDuration cannot contain negative values.</exception>
-    /// <exception cref="ArgumentException">RedisCacheDuration cannot contain negative values.</exception>
-    /// <exception cref="ArgumentNullException">The server cannot be empty.</exception>
-    /// <exception cref="ArgumentException">The server cannot contain a port number.</exception>
-    /// <exception cref="ArgumentException">The port number cannot be 0.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">The flush batch size cannot be bigger than 8000.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">The insert batch size cannot be bigger than 5000.</exception>
-    /// <returns>The cache builder. Needed to add individual items</returns>
-    public static CacheBuilder AddCache(this IServiceCollection services, Action<CacheServerOptions> options)
+    /// <param name="services">The service collection.</param>
+    /// <param name="configureOptions">The action configuring the cache server options.</param>
+    /// <remarks>
+    /// When a distributed cache is configured, the connection is created during the registration. If it is unreachable the application still starts, but the connection retries can make the startup slightly longer.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">The configure options action is null.</exception>
+    /// <exception cref="ArgumentException">The global tenant ID is invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="ArgumentNullException">A distributed cache type is selected but the distributed cache options are missing or are not of the expected type (RedisCacheOptions for redis).</exception>
+    /// <exception cref="ArgumentException">The server is empty or whitespace, or it contains a port number.</exception>
+    /// <exception cref="ArgumentException">The port number is 0.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The get, remove or insert batch size is 0 or bigger than 5000.</exception>
+    /// <returns>The cache builder, used to add the cached types with <see cref="AddItem{TItem}(CacheBuilder, Action{CacheOptions{TItem}})"/>.</returns>
+    public static CacheBuilder AddCache(this IServiceCollection services, Action<CacheServerOptions> configureOptions)
     {
-        CacheServerOptions cacheServerOptions = new();
+        ArgumentNullException.ThrowIfNull(services, nameof(services));
+        ArgumentNullException.ThrowIfNull(configureOptions, nameof(configureOptions));
 
-        options(cacheServerOptions);
+        CacheServerOptions cacheServerOptions = new();
+        configureOptions(cacheServerOptions);
 
         ValidateCacheServerOptions(cacheServerOptions);
 
@@ -49,35 +54,39 @@ public static class CacheExtensions
 
         services.AddSingleton(typeof(ICacheService<>), typeof(CacheService<>));
 
-        services.Configure(options);
+        services.Configure(configureOptions);
 
         return new(services);
     }
 
     /// <summary>
-    /// Add Items to cache
+    /// Registers the cache configuration of a cached type.
     /// </summary>
-    /// <typeparam name="TItem">Class to cache</typeparam>
-    /// <param name="builder">Cache Builder</param>
-    /// <param name="setupAction">CacheOptions of TItem setup action</param>
-    /// <returns>CacheBuilder</returns>
-    /// <exception cref="ArgumentException">The type name already exists, and cannot be configured a second time</exception>
-    /// <exception cref="ArgumentNullException">The cache key cannot be null or empty.</exception>
-    /// <exception cref="ArgumentException">The memory cache duration cannot contain negative values.</exception>
-    /// <exception cref="ArgumentException">The redis cache duration cannot contain negative values.</exception>
-    public static CacheBuilder AddItem<TItem>(this CacheBuilder builder, Action<CacheOptions<TItem>> setupAction)
+    /// <typeparam name="TItem">The type of the items to cache.</typeparam>
+    /// <param name="cacheBuilder">The cache builder returned by <see cref="AddCache(IServiceCollection, Action{CacheServerOptions})"/>.</param>
+    /// <param name="configureOptions">The action configuring the cache options of <typeparamref name="TItem"/>.</param>
+    /// <returns>The cache builder.</returns>
+    /// <exception cref="ArgumentNullException">The configure options action is null.</exception>
+    /// <exception cref="ArgumentException">The type is already configured and cannot be configured a second time.</exception>
+    /// <exception cref="ArgumentException">The cache key is null, empty or whitespace.</exception>
+    /// <exception cref="ArgumentException">The cache key is longer than 50 characters.</exception>
+    /// <exception cref="ArgumentException">The memory cache duration is negative.</exception>
+    /// <exception cref="ArgumentException">The distributed cache duration is negative.</exception>
+    public static CacheBuilder AddItem<TItem>(this CacheBuilder cacheBuilder, Action<CacheOptions<TItem>> configureOptions)
     {
-        //Validate options
+        ArgumentNullException.ThrowIfNull(cacheBuilder, nameof(cacheBuilder));
+        ArgumentNullException.ThrowIfNull(configureOptions, nameof(configureOptions));
+
         CacheOptions<TItem> options = new();
-        setupAction(options);
+        configureOptions(options);
 
-        ValidateCacheOptions(builder, options);
+        ValidateCacheOptions(cacheBuilder, options);
 
-        builder.Services.Configure(setupAction);
+        cacheBuilder.Services.Configure(configureOptions);
 
-        builder.CachedTypes.Add(typeof(TItem));
+        cacheBuilder.CachedTypes.Add(typeof(TItem));
 
-        return builder;
+        return cacheBuilder;
     }
 
     #region Distributed Cache
@@ -103,7 +112,6 @@ public static class CacheExtensions
         ConfigurationOptions configurationOptions = new()
         {
             AbortOnConnectFail = false,
-            AllowAdmin = true,
             ConnectTimeout = 5000,
             ConnectRetry = 5,
             KeepAlive = 60,
@@ -152,18 +160,23 @@ public static class CacheExtensions
 
     #region Validations
 
-    private static void ValidateCacheOptions<TItem>(CacheBuilder builder, CacheOptions<TItem> cacheOptions)
+    private static void ValidateCacheOptions<TItem>(CacheBuilder cacheBuilder, CacheOptions<TItem> cacheOptions)
     {
         Type type = typeof(TItem);
 
-        if (builder.CachedTypes.Contains(type))
+        if (cacheBuilder.CachedTypes.Contains(type))
         {
             throw new ArgumentException($"Caching - The type {type.Name} already exists, and cannot be configured a second time");
         }
 
         if (string.IsNullOrWhiteSpace(cacheOptions.CacheKey))
         {
-            throw new ArgumentNullException(null, $"Caching - The {nameof(cacheOptions.CacheKey)} cannot be null or empty.");
+            throw new ArgumentException($"Caching - The {nameof(cacheOptions.CacheKey)} cannot be null or empty.");
+        }
+
+        if (cacheOptions.CacheKey.Length > 50)
+        {
+            throw new ArgumentException($"Caching - The {nameof(cacheOptions.CacheKey)} of '{type.Name}' cannot be longer than 50 characters (current length: {cacheOptions.CacheKey.Length}).");
         }
 
         if (cacheOptions.MemoryCacheDuration.Ticks < 0)
@@ -220,14 +233,16 @@ public static class CacheExtensions
             throw new ArgumentException("Caching - The port number cannot be 0.", nameof(distributedCacheOptions));
         }
 
-        if (redisCacheOptions.FlushBatchSize > 8000)
-        {
-            throw new ArgumentOutOfRangeException(nameof(distributedCacheOptions), $"Caching - The {nameof(redisCacheOptions.FlushBatchSize)} cannot be bigger than 8000.");
-        }
+        ValidateBatchSize(nameof(redisCacheOptions.GetBatchSize), redisCacheOptions.GetBatchSize);
+        ValidateBatchSize(nameof(redisCacheOptions.InsertBatchSize), redisCacheOptions.InsertBatchSize);
+        ValidateBatchSize(nameof(redisCacheOptions.RemoveBatchSize), redisCacheOptions.RemoveBatchSize);
+    }
 
-        if (redisCacheOptions.InsertBatchSize > 5000)
+    private static void ValidateBatchSize(string propertyName, ushort batchSize)
+    {
+        if (batchSize == 0 || batchSize > _maxBatchSize)
         {
-            throw new ArgumentOutOfRangeException(nameof(distributedCacheOptions), $"Caching - The {nameof(redisCacheOptions.InsertBatchSize)} cannot be bigger than 5000.");
+            throw new ArgumentOutOfRangeException(propertyName, $"Caching - The {propertyName} cannot be 0 or bigger than {_maxBatchSize}.");
         }
     }
 

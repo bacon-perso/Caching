@@ -1,14 +1,14 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Bacon.Caching.Models;
 
 /// <summary>
-/// Cache builder
+/// Builder used to register the cached types.
 /// </summary>
 public sealed class CacheBuilder(IServiceCollection services)
 {
     /// <summary>
-    /// Service collection
+    /// The service collection the cache is registered in.
     /// </summary>
     public IServiceCollection Services { get; } = services;
 

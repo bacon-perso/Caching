@@ -1,3 +1,4 @@
+using Bacon.Caching.Interfaces.Services;
 using Bacon.Caching.Models;
 using Bacon.Caching.Services;
 using Bacon.Caching.Tests.Fakes;
@@ -27,7 +28,7 @@ internal sealed class CacheServiceTests
     [TearDown]
     public void TearDown() => _memoryCache.Dispose();
 
-    private CacheService<TestItem> CreateService(string tenantId = TenantId, TimeSpan? memDuration = null, TimeSpan? distDuration = null, bool includeDistributedCache = true)
+    private CacheService<TestItem> CreateService(string? tenantId = TenantId, TimeSpan? memDuration = null, TimeSpan? distDuration = null, bool includeDistributedCache = true)
     {
         IOptions<CacheServerOptions> serverOptions = Options.Create(new CacheServerOptions { TenantId = tenantId });
         IOptions<CacheOptions<TestItem>> cacheOptions = Options.Create(new CacheOptions<TestItem>
@@ -40,55 +41,144 @@ internal sealed class CacheServiceTests
         return new CacheService<TestItem>(serverOptions, cacheOptions, _memoryCache, NullLogger<TestItem>.Instance, includeDistributedCache ? _fakeDistCache : null);
     }
 
+    private static string Key(string suffix = "", string tenantId = TenantId) => $"{tenantId}_{CacheKey}{suffix}";
+
+    private CacheService<TestItem> CreateMemoryOnlyService() => CreateService(distDuration: TimeSpan.Zero, includeDistributedCache: false);
+
+    private CacheService<TestItem> CreateDistributedOnlyService() => CreateService(memDuration: TimeSpan.Zero);
+
     #region Get / Set
 
     [Test]
-    public async Task SetItemAsync_GetItemAsync_ReturnsItem()
+    public async Task SetAsync_GetAsync_WithoutSuffix_ReturnsItem()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await sut.SetItemAsync(new TestItem { Name = "Alice", Value = 1 });
+        await sut.SetAsync(new TestItem { Name = "Alice", Value = 1 });
 
-        TestItem? result = await sut.GetItemAsync();
+        TestItem? result = await sut.GetAsync();
 
         using (Assert.EnterMultipleScope())
         {
             Assert.That(result, Is.Not.Null);
             Assert.That(result!.Name, Is.EqualTo("Alice"));
+            Assert.That(_fakeDistCache.Contains(Key()), Is.True);
         };
     }
 
     [Test]
-    public async Task SetItemAsync_GetItemAsync_WithSuffix_IsolatesByKey()
+    public async Task SetAsync_GetAsync_WithSuffix_IsolatesByKey()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await sut.SetItemAsync(new TestItem { Name = "Alice" }, cacheKeySuffix: "id1");
-        await sut.SetItemAsync(new TestItem { Name = "Bob" }, cacheKeySuffix: "id2");
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+        await sut.SetAsync(new TestItem { Name = "Bob" }, "id2");
 
         using (Assert.EnterMultipleScope())
         {
-            Assert.That((await sut.GetItemAsync(cacheKeySuffix: "id1"))!.Name, Is.EqualTo("Alice"));
-            Assert.That((await sut.GetItemAsync(cacheKeySuffix: "id2"))!.Name, Is.EqualTo("Bob"));
+            Assert.That((await sut.GetAsync("id1"))!.Name, Is.EqualTo("Alice"));
+            Assert.That((await sut.GetAsync("id2"))!.Name, Is.EqualTo("Bob"));
         };
     }
 
     [Test]
-    public async Task GetItemAsync_WhenNotCached_ReturnsNull()
+    public async Task SetAsync_PositionalStringArgument_IsTreatedAsSuffix_OnConcreteClass()
     {
         CacheService<TestItem> sut = CreateService();
 
-        Assert.That(await sut.GetItemAsync(cacheKeySuffix: "missing"), Is.Null);
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(Key("id1")), Is.True);
+            Assert.That(_fakeDistCache.Contains(Key(tenantId: "id1")), Is.False);
+        };
     }
 
     [Test]
-    public async Task SetItemAsync_StoresInDistributedCache()
+    public async Task PositionalStringArgument_IsTreatedAsSuffix_OnInterface()
+    {
+        ICacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        TestItem? result = await sut.GetAsync("id1");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(Key("id1")), Is.True);
+            Assert.That(result!.Name, Is.EqualTo("Alice"));
+        };
+
+        await sut.RemoveAsync("id1");
+
+        Assert.That(_fakeDistCache.Contains(Key("id1")), Is.False);
+    }
+
+    [Test]
+    public async Task NamedTenantIdArgument_IsTreatedAsTenant_OnInterface()
+    {
+        ICacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, tenantId: "tenant-a");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(Key(tenantId: "tenant-a")), Is.True);
+            Assert.That((await sut.GetAsync(tenantId: "tenant-a"))!.Name, Is.EqualTo("Alice"));
+            Assert.That(await sut.GetAsync(), Is.Null);
+        };
+
+        await sut.RemoveAsync(tenantId: "tenant-a");
+
+        Assert.That(_fakeDistCache.Contains(Key(tenantId: "tenant-a")), Is.False);
+    }
+
+    [Test]
+    public async Task SetAsync_GetAsync_WithIntSuffix_UsesToStringInKey()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await sut.SetItemAsync(new TestItem { Name = "Alice" }, cacheKeySuffix:"id1");
+        await sut.SetAsync(new TestItem { Name = "Alice" }, 42);
 
-        Assert.That(_fakeDistCache.Contains($"{TenantId}_{CacheKey}id1"), Is.True);
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(Key("42")), Is.True);
+            Assert.That((await sut.GetAsync(42))!.Name, Is.EqualTo("Alice"));
+        };
+    }
+
+    [Test]
+    public async Task SetAsync_GetAsync_WithGuidSuffix_UsesToStringInKey()
+    {
+        CacheService<TestItem> sut = CreateService();
+        Guid id = Guid.NewGuid();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, id);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(Key(id.ToString())), Is.True);
+            Assert.That((await sut.GetAsync(id))!.Name, Is.EqualTo("Alice"));
+        };
+    }
+
+    [Test]
+    public async Task GetAsync_WhenNotCached_ReturnsNull()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        Assert.That(await sut.GetAsync("missing"), Is.Null);
+    }
+
+    [Test]
+    public async Task SetAsync_StoresInDistributedCache()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        Assert.That(_fakeDistCache.Contains(Key("id1")), Is.True);
     }
 
     #endregion
@@ -96,116 +186,45 @@ internal sealed class CacheServiceTests
     #region Memory-first / fallthrough
 
     [Test]
-    public async Task GetItemAsync_MemoryMiss_FallsThroughToDistributed()
+    public async Task GetAsync_MemoryMiss_FallsThroughToDistributed()
     {
         CacheService<TestItem> sut = CreateService();
 
-        _fakeDistCache.Seed($"{TenantId}_{CacheKey}myid", new TestItem { Name = "FromRedis" });
+        _fakeDistCache.Seed(Key("myid"), new TestItem { Name = "FromRedis" });
 
-        TestItem? result = await sut.GetItemAsync(cacheKeySuffix: "myid");
+        TestItem? result = await sut.GetAsync("myid");
 
         Assert.That(result!.Name, Is.EqualTo("FromRedis"));
     }
 
     [Test]
-    public async Task GetItemAsync_DistributedHit_BackfillsMemoryCache()
+    public async Task GetAsync_DistributedHit_BackfillsMemoryCache()
     {
         CacheService<TestItem> sut = CreateService();
 
-        _fakeDistCache.Seed($"{TenantId}_{CacheKey}myid", new TestItem { Name = "FromRedis" });
+        _fakeDistCache.Seed(Key("myid"), new TestItem { Name = "FromRedis" });
 
-        await sut.GetItemAsync(cacheKeySuffix: "myid"); // populates memory cache
+        await sut.GetAsync("myid"); // populates memory cache
 
         _fakeDistCache.Clear(); // wipe distributed
 
-        TestItem? result = await sut.GetItemAsync(cacheKeySuffix: "myid"); // should hit memory
+        TestItem? result = await sut.GetAsync("myid"); // should hit memory
 
         Assert.That(result!.Name, Is.EqualTo("FromRedis"));
     }
 
     [Test]
-    public async Task GetItemAsync_MemoryHit_DoesNotRequireDistributed()
+    public async Task GetAsync_MemoryHit_DoesNotRequireDistributed()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await sut.SetItemAsync(new TestItem { Name = "InMemory" }, cacheKeySuffix: "id1");
+        await sut.SetAsync(new TestItem { Name = "InMemory" }, "id1");
 
         _fakeDistCache.Clear(); // remove from distributed after set
 
-        TestItem? result = await sut.GetItemAsync(cacheKeySuffix: "id1");
+        TestItem? result = await sut.GetAsync("id1");
 
         Assert.That(result!.Name, Is.EqualTo("InMemory"));
-    }
-
-    #endregion
-
-    #region Memory-only operations
-
-    [Test]
-    public void SetMemoryItem_GetMemoryItem_ReturnsItem()
-    {
-        CacheService<TestItem> sut = CreateService(includeDistributedCache: false);
-
-        sut.SetMemoryItem(new TestItem { Name = "MemOnly" }, cacheKeySuffix: "key1");
-
-        Assert.That(sut.GetMemoryItem(cacheKeySuffix: "key1")!.Name, Is.EqualTo("MemOnly"));
-    }
-
-    [Test]
-    public void GetMemoryItem_WhenNotCached_ReturnsNull()
-    {
-        CacheService<TestItem> sut = CreateService(includeDistributedCache: false);
-
-        Assert.That(sut.GetMemoryItem(cacheKeySuffix: "missing"), Is.Null);
-    }
-
-    [Test]
-    public void RemoveMemoryItem_RemovesFromMemory()
-    {
-        CacheService<TestItem> sut = CreateService(includeDistributedCache: false);
-
-        sut.SetMemoryItem(new TestItem { Name = "ToRemove" }, cacheKeySuffix: "key1");
-
-        sut.RemoveMemoryItem(cacheKeySuffix: "key1");
-
-        Assert.That(sut.GetMemoryItem(cacheKeySuffix: "key1"), Is.Null);
-    }
-
-    [Test]
-    public void SetMemoryItems_GetMemoryItems_ReturnsAllItems()
-    {
-        CacheService<TestItem> sut = CreateService(includeDistributedCache: false);
-
-        sut.SetMemoryItems(new Dictionary<string, TestItem>
-        {
-            ["a"] = new TestItem { Name = "Alice" },
-            ["b"] = new TestItem { Name = "Bob" },
-        });
-
-        IDictionary<string, TestItem?> result = sut.GetMemoryItems(cacheKeySuffixes: ["a", "b"]);
-
-        using (Assert.EnterMultipleScope())
-        {
-            Assert.That(result["a"]!.Name, Is.EqualTo("Alice"));
-            Assert.That(result["b"]!.Name, Is.EqualTo("Bob"));
-        };
-    }
-
-    [Test]
-    public void FlushMemoryItems_RemovesAllMatchingKeys()
-    {
-        CacheService<TestItem> sut = CreateService(includeDistributedCache: false);
-
-        sut.SetMemoryItem(new TestItem { Name = "A" }, cacheKeySuffix: "key1");
-        sut.SetMemoryItem(new TestItem { Name = "B" }, cacheKeySuffix: "key2");
-
-        sut.FlushMemoryItems();
-
-        using (Assert.EnterMultipleScope())
-        {
-            Assert.That(sut.GetMemoryItem(cacheKeySuffix: "key1"), Is.Null);
-            Assert.That(sut.GetMemoryItem(cacheKeySuffix: "key2"), Is.Null);
-        };
     }
 
     #endregion
@@ -223,7 +242,7 @@ internal sealed class CacheServiceTests
             ["id2"] = new TestItem { Name = "Bob" },
         });
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(cacheKeySuffixes: ["id1", "id2"]);
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -233,13 +252,36 @@ internal sealed class CacheServiceTests
     }
 
     [Test]
+    public async Task SetItemsAsync_StoresInBothLayers()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetItemsAsync(new Dictionary<string, TestItem>
+        {
+            ["id1"] = new TestItem { Name = "Alice" },
+            ["id2"] = new TestItem { Name = "Bob" },
+        });
+
+        bool inDistributed = _fakeDistCache.Contains(Key("id1")) && _fakeDistCache.Contains(Key("id2"));
+
+        _fakeDistCache.Clear();
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(inDistributed, Is.True);
+            Assert.That((await sut.GetAsync("id1"))!.Name, Is.EqualTo("Alice")); // served from memory
+            Assert.That((await sut.GetAsync("id2"))!.Name, Is.EqualTo("Bob"));
+        };
+    }
+
+    [Test]
     public async Task GetItemsAsync_MixedHitsAndMisses_NullForMissing()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await sut.SetItemAsync(new TestItem { Name = "Alice" }, cacheKeySuffix: "id1");
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(cacheKeySuffixes: ["id1", "missing"]);
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "missing"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -253,11 +295,117 @@ internal sealed class CacheServiceTests
     {
         CacheService<TestItem> sut = CreateService();
 
-        _fakeDistCache.Seed($"{TenantId}_{CacheKey}id1", new TestItem { Name = "FromRedis" });
+        _fakeDistCache.Seed(Key("id1"), new TestItem { Name = "FromRedis" });
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(cacheKeySuffixes: ["id1"]);
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1"]);
 
         Assert.That(result["id1"]!.Name, Is.EqualTo("FromRedis"));
+    }
+
+    [Test]
+    public async Task GetItemsAsync_OnlyMemoryMissesAreRequestedFromDistributed()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "InMemory" }, "id1");
+
+        _fakeDistCache.Clear();
+        _fakeDistCache.Seed(Key("id2"), new TestItem { Name = "FromRedis" });
+        _fakeDistCache.RequestedKeys.Clear();
+
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.RequestedKeys, Is.EqualTo(new[] { Key("id2") }));
+            Assert.That(result["id1"]!.Name, Is.EqualTo("InMemory"));
+            Assert.That(result["id2"]!.Name, Is.EqualTo("FromRedis"));
+        };
+    }
+
+    [Test]
+    public async Task GetItemsAsync_DistributedHit_BackfillsMemoryCache()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        _fakeDistCache.Seed(Key("id1"), new TestItem { Name = "FromRedis" });
+
+        await sut.GetItemsAsync(["id1"]); // populates memory cache
+
+        _fakeDistCache.Clear();
+
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1"]);
+
+        Assert.That(result["id1"]!.Name, Is.EqualTo("FromRedis"));
+    }
+
+    [Test]
+    public async Task GetItemsAsync_MemoryDisabled_ReturnsDistributedValues()
+    {
+        CacheService<TestItem> sut = CreateService(memDuration: TimeSpan.Zero);
+
+        _fakeDistCache.Seed(Key("id1"), new TestItem { Name = "FromRedis" });
+
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "missing"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result["id1"]!.Name, Is.EqualTo("FromRedis"));
+            Assert.That(result["missing"], Is.Null);
+        };
+    }
+
+    [Test]
+    public async Task GetItemsAsync_DuplicateSuffixes_AreDeduplicated()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id1", "id2"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result, Has.Count.EqualTo(2));
+            Assert.That(result["id1"]!.Name, Is.EqualTo("Alice"));
+            Assert.That(result["id2"], Is.Null);
+        };
+    }
+
+    [Test]
+    public async Task GetItemsAsync_IntSuffixes_MapBackToSuffix()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetItemsAsync(new Dictionary<int, TestItem>
+        {
+            [1] = new TestItem { Name = "Alice" },
+            [2] = new TestItem { Name = "Bob" },
+        });
+
+        IDictionary<int, TestItem?> result = await sut.GetItemsAsync([1, 2, 3]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result[1]!.Name, Is.EqualTo("Alice"));
+            Assert.That(result[2]!.Name, Is.EqualTo("Bob"));
+            Assert.That(result[3], Is.Null);
+        };
+    }
+
+    [Test]
+    public async Task GetItemsAsync_BothDurationsZero_ReturnsNullForEachSuffix()
+    {
+        CacheService<TestItem> sut = CreateService(memDuration: TimeSpan.Zero, distDuration: TimeSpan.Zero);
+
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result, Has.Count.EqualTo(2));
+            Assert.That(result["id1"], Is.Null);
+            Assert.That(result["id2"], Is.Null);
+        };
     }
 
     #endregion
@@ -265,57 +413,181 @@ internal sealed class CacheServiceTests
     #region Remove
 
     [Test]
-    public async Task RemoveItemAsync_RemovesFromBothCaches()
+    public async Task RemoveAsync_WithoutSuffix_RemovesFromBothCaches()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await sut.SetItemAsync(new TestItem { Name = "ToRemove" }, cacheKeySuffix: "key1");
+        await sut.SetAsync(new TestItem { Name = "ToRemove" });
 
-        await sut.RemoveItemAsync(cacheKeySuffix: "key1");
+        await sut.RemoveAsync();
 
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(await sut.GetItemAsync(cacheKeySuffix: "key1"), Is.Null);
-            Assert.That(_fakeDistCache.Contains($"{TenantId}_{CacheKey}key1"), Is.False);
+            Assert.That(await sut.GetAsync(), Is.Null);
+            Assert.That(_fakeDistCache.Contains(Key()), Is.False);
         };
     }
 
     [Test]
-    public async Task RemoveItemsAsync_RemovesAllSpecifiedKeys()
+    public async Task RemoveAsync_WithSuffix_RemovesFromBothCaches()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await sut.SetItemAsync(new TestItem { Name = "A" }, cacheKeySuffix: "key1");
-        await sut.SetItemAsync(new TestItem { Name = "B" }, cacheKeySuffix: "key2");
+        await sut.SetAsync(new TestItem { Name = "ToRemove" }, "key1");
+        await sut.SetAsync(new TestItem { Name = "ToKeep" }, "key2");
+
+        await sut.RemoveAsync("key1");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(await sut.GetAsync("key1"), Is.Null);
+            Assert.That(_fakeDistCache.Contains(Key("key1")), Is.False);
+            Assert.That((await sut.GetAsync("key2"))!.Name, Is.EqualTo("ToKeep"));
+        };
+    }
+
+    [Test]
+    public async Task RemoveItemsAsync_RemovesAllSpecifiedKeysFromBothCaches()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "A" }, "key1");
+        await sut.SetAsync(new TestItem { Name = "B" }, "key2");
+        await sut.SetAsync(new TestItem { Name = "C" }, "key3");
 
         await sut.RemoveItemsAsync(["key1", "key2"]);
 
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(await sut.GetItemAsync(cacheKeySuffix: "key1"), Is.Null);
-            Assert.That(await sut.GetItemAsync(cacheKeySuffix: "key2"), Is.Null);
+            Assert.That(await sut.GetAsync("key1"), Is.Null);
+            Assert.That(await sut.GetAsync("key2"), Is.Null);
+            Assert.That(_fakeDistCache.Contains(Key("key1")), Is.False);
+            Assert.That(_fakeDistCache.Contains(Key("key2")), Is.False);
+            Assert.That((await sut.GetAsync("key3"))!.Name, Is.EqualTo("C"));
         };
+    }
+
+    [Test]
+    public async Task RemoveItemsAsync_DuplicateSuffixes_DoesNotThrow()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "A" }, "key1");
+
+        await sut.RemoveItemsAsync(["key1", "key1"]);
+
+        Assert.That(await sut.GetAsync("key1"), Is.Null);
     }
 
     #endregion
 
-    #region Flush
+    #region Distributed failures (graceful degradation)
 
     [Test]
-    public async Task FlushItemsAsync_ClearsAllMatchingFromBothCaches()
+    public async Task GetAsync_DistributedFailure_DoesNotThrowAndReturnsNull()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await sut.SetItemAsync(new TestItem { Name = "A" }, cacheKeySuffix: "key1");
-        await sut.SetItemAsync(new TestItem { Name = "B" }, cacheKeySuffix: "key2");
+        _fakeDistCache.FailWith = new InvalidOperationException("redis down");
 
-        await sut.FlushItemsAsync();
+        Assert.That(await sut.GetAsync("id1"), Is.Null);
+    }
+
+    [Test]
+    public async Task GetItemsAsync_DistributedFailure_ReturnsMemoryHitsAndNullForMisses()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "InMemory" }, "id1");
+
+        _fakeDistCache.FailWith = new InvalidOperationException("redis down");
+
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
 
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(await sut.GetItemAsync(cacheKeySuffix: "key1"), Is.Null);
-            Assert.That(await sut.GetItemAsync(cacheKeySuffix: "key2"), Is.Null);
+            Assert.That(result["id1"]!.Name, Is.EqualTo("InMemory"));
+            Assert.That(result["id2"], Is.Null);
         };
+    }
+
+    [Test]
+    public async Task SetAsync_DistributedFailure_StillStoresInMemory()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        _fakeDistCache.FailWith = new InvalidOperationException("redis down");
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        _fakeDistCache.FailWith = null;
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(Key("id1")), Is.False);
+            Assert.That((await sut.GetAsync("id1"))!.Name, Is.EqualTo("Alice")); // served from memory
+        };
+    }
+
+    [Test]
+    public async Task SetItemsAsync_DistributedFailure_StillStoresInMemory()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        _fakeDistCache.FailWith = new InvalidOperationException("redis down");
+
+        await sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id1"] = new TestItem { Name = "Alice" } });
+
+        _fakeDistCache.FailWith = null;
+
+        Assert.That((await sut.GetAsync("id1"))!.Name, Is.EqualTo("Alice")); // served from memory
+    }
+
+    [Test]
+    public async Task RemoveAsync_DistributedFailure_StillRemovesFromMemory()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        _fakeDistCache.FailWith = new InvalidOperationException("redis down");
+
+        await sut.RemoveAsync("id1");
+
+        _fakeDistCache.FailWith = null;
+        _fakeDistCache.Clear();
+
+        Assert.That(await sut.GetAsync("id1"), Is.Null); // would still be in memory if the removal had been skipped
+    }
+
+    [Test]
+    public async Task RemoveItemsAsync_DistributedFailure_StillRemovesFromMemory()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "A" }, "key1");
+        await sut.SetAsync(new TestItem { Name = "B" }, "key2");
+
+        _fakeDistCache.FailWith = new InvalidOperationException("redis down");
+
+        await sut.RemoveItemsAsync(["key1", "key2"]);
+
+        _fakeDistCache.FailWith = null;
+        _fakeDistCache.Clear();
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(await sut.GetAsync("key1"), Is.Null);
+            Assert.That(await sut.GetAsync("key2"), Is.Null);
+        };
+    }
+
+    [Test]
+    public async Task GetAsync_DistributedEnabledButNotRegistered_DoesNotThrow()
+    {
+        CacheService<TestItem> sut = CreateService(includeDistributedCache: false);
+
+        Assert.That(await sut.GetAsync("id1"), Is.Null);
     }
 
     #endregion
@@ -323,17 +595,35 @@ internal sealed class CacheServiceTests
     #region Tenant isolation
 
     [Test]
-    public async Task GetItemAsync_WithTenantOverride_IsolatesPerTenant()
+    public async Task GetAsync_WithTenantOverride_IsolatesPerTenant()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await sut.SetItemAsync(new TestItem { Name = "Alice" }, cacheKeySuffix: "key1", tenantId: "tenant-a");
-        await sut.SetItemAsync(new TestItem { Name = "Bob" }, cacheKeySuffix: "key1", tenantId: "tenant-b");
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "key1", tenantId: "tenant-a");
+        await sut.SetAsync(new TestItem { Name = "Bob" }, "key1", tenantId: "tenant-b");
 
         using (Assert.EnterMultipleScope())
         {
-            Assert.That((await sut.GetItemAsync(cacheKeySuffix: "key1", tenantId: "tenant-a"))!.Name, Is.EqualTo("Alice"));
-            Assert.That((await sut.GetItemAsync(cacheKeySuffix: "key1", tenantId: "tenant-b"))!.Name, Is.EqualTo("Bob"));
+            Assert.That((await sut.GetAsync("key1", tenantId: "tenant-a"))!.Name, Is.EqualTo("Alice"));
+            Assert.That((await sut.GetAsync("key1", tenantId: "tenant-b"))!.Name, Is.EqualTo("Bob"));
+            Assert.That(await sut.GetAsync("key1"), Is.Null); // the global tenant is a third, separate tenant
+        };
+    }
+
+    [Test]
+    public async Task SetItemsAsync_GetItemsAsync_WithTenantOverride_IsolatesPerTenant()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id1"] = new TestItem { Name = "Alice" } }, tenantId: "tenant-a");
+
+        IDictionary<string, TestItem?> tenantA = await sut.GetItemsAsync(["id1"], tenantId: "tenant-a");
+        IDictionary<string, TestItem?> globalTenant = await sut.GetItemsAsync(["id1"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(tenantA["id1"]!.Name, Is.EqualTo("Alice"));
+            Assert.That(globalTenant["id1"], Is.Null);
         };
     }
 
@@ -342,33 +632,437 @@ internal sealed class CacheServiceTests
     #region Duration zero
 
     [Test]
-    public async Task GetItemAsync_BothDurationsZero_AlwaysReturnsNull()
+    public async Task GetAsync_BothDurationsZero_AlwaysReturnsNull()
     {
         CacheService<TestItem> sut = CreateService(memDuration: TimeSpan.Zero, distDuration: TimeSpan.Zero);
 
-        await sut.SetItemAsync(new TestItem { Name = "ShouldNotBeCached" });
+        await sut.SetAsync(new TestItem { Name = "ShouldNotBeCached" });
 
-        Assert.That(await sut.GetItemAsync(), Is.Null);
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(await sut.GetAsync(), Is.Null);
+            Assert.That(_fakeDistCache.Contains(Key()), Is.False);
+        };
     }
 
     [Test]
-    public void SetMemoryItem_WhenMemoryDurationIsZero_DoesNotStore()
+    public async Task SetAsync_WhenMemoryDurationIsZero_StoresOnlyInDistributed()
     {
-        CacheService<TestItem> sut = CreateService(memDuration: TimeSpan.Zero, includeDistributedCache: false);
+        CacheService<TestItem> sut = CreateService(memDuration: TimeSpan.Zero);
 
-        sut.SetMemoryItem(new TestItem { Name = "ShouldNotStore" }, cacheKeySuffix: "key1");
+        await sut.SetAsync(new TestItem { Name = "DistOnly" }, "key1");
 
-        Assert.That(sut.GetMemoryItem(cacheKeySuffix: "key1"), Is.Null);
+        _fakeDistCache.Seed(Key("key1"), new TestItem { Name = "Changed" }); // proves reads go to the distributed cache, not to memory
+
+        Assert.That((await sut.GetAsync("key1"))!.Name, Is.EqualTo("Changed"));
     }
 
     [Test]
-    public async Task SetItemAsync_WhenDistributedDurationIsZero_DoesNotStoreInDistributed()
+    public async Task SetAsync_WhenDistributedDurationIsZero_DoesNotStoreInDistributed()
     {
         CacheService<TestItem> sut = CreateService(distDuration: TimeSpan.Zero);
 
-        await sut.SetItemAsync(new TestItem { Name = "MemOnly" }, cacheKeySuffix: "key1");
+        await sut.SetAsync(new TestItem { Name = "MemOnly" }, "key1");
 
-        Assert.That(_fakeDistCache.Contains($"{TenantId}_{CacheKey}key1"), Is.False);
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(Key("key1")), Is.False);
+            Assert.That((await sut.GetAsync("key1"))!.Name, Is.EqualTo("MemOnly"));
+        };
+    }
+
+    [Test]
+    public async Task MemoryOnly_WithoutDistributedService_Works()
+    {
+        CacheService<TestItem> sut = CreateService(distDuration: TimeSpan.Zero, includeDistributedCache: false);
+
+        await sut.SetAsync(new TestItem { Name = "MemOnly" }, "key1");
+        await sut.SetItemsAsync(new Dictionary<string, TestItem> { ["key2"] = new TestItem { Name = "MemOnly2" } });
+
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["key1", "key2"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result["key1"]!.Name, Is.EqualTo("MemOnly"));
+            Assert.That(result["key2"]!.Name, Is.EqualTo("MemOnly2"));
+        };
+
+        await sut.RemoveItemsAsync(["key1", "key2"]);
+
+        Assert.That(await sut.GetAsync("key1"), Is.Null);
+    }
+
+    #endregion
+
+    #region Memory only
+
+    [Test]
+    public async Task MemoryOnly_WithoutSuffix_SetGetRemove_Works()
+    {
+        CacheService<TestItem> sut = CreateMemoryOnlyService();
+
+        await sut.SetAsync(new TestItem { Name = "Config" });
+
+        TestItem? stored = await sut.GetAsync();
+
+        await sut.RemoveAsync();
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(stored!.Name, Is.EqualTo("Config"));
+            Assert.That(await sut.GetAsync(), Is.Null);
+        };
+    }
+
+    [Test]
+    public async Task MemoryOnly_RemoveAsync_WithSuffix_RemovesOnlyThatItem()
+    {
+        CacheService<TestItem> sut = CreateMemoryOnlyService();
+
+        await sut.SetAsync(new TestItem { Name = "ToRemove" }, "key1");
+        await sut.SetAsync(new TestItem { Name = "ToKeep" }, "key2");
+
+        await sut.RemoveAsync("key1");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(await sut.GetAsync("key1"), Is.Null);
+            Assert.That((await sut.GetAsync("key2"))!.Name, Is.EqualTo("ToKeep"));
+        };
+    }
+
+    [Test]
+    public async Task MemoryOnly_NeverTouchesTheDistributedCache()
+    {
+        CacheService<TestItem> sut = CreateService(distDuration: TimeSpan.Zero);
+
+        _fakeDistCache.Seed(Key("seeded"), new TestItem { Name = "FromRedis" });
+        _fakeDistCache.RequestedKeys.Clear();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+        TestItem? seeded = await sut.GetAsync("seeded");
+        await sut.GetItemsAsync(["id1", "seeded"]);
+        await sut.RemoveAsync("id1");
+        await sut.RemoveItemsAsync(["seeded"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(seeded, Is.Null); // the seeded distributed value is never read
+            Assert.That(_fakeDistCache.RequestedKeys, Is.Empty);
+            Assert.That(_fakeDistCache.Contains(Key("id1")), Is.False);
+            Assert.That(_fakeDistCache.Contains(Key("seeded")), Is.True); // and never removed
+        };
+    }
+
+    #endregion
+
+    #region Distributed only
+
+    [Test]
+    public async Task DistributedOnly_WithoutSuffix_SetAndGet_UseDistributedCache()
+    {
+        CacheService<TestItem> sut = CreateDistributedOnlyService();
+
+        await sut.SetAsync(new TestItem { Name = "Config" });
+
+        _fakeDistCache.Seed(Key(), new TestItem { Name = "Changed" }); // proves the read goes to the distributed cache
+
+        Assert.That((await sut.GetAsync())!.Name, Is.EqualTo("Changed"));
+    }
+
+    [Test]
+    public async Task DistributedOnly_SetItemsAsync_GetItemsAsync_UseDistributedCache()
+    {
+        CacheService<TestItem> sut = CreateDistributedOnlyService();
+
+        await sut.SetItemsAsync(new Dictionary<string, TestItem>
+        {
+            ["id1"] = new TestItem { Name = "Alice" },
+            ["id2"] = new TestItem { Name = "Bob" },
+        });
+
+        bool storedInDistributed = _fakeDistCache.Contains(Key("id1")) && _fakeDistCache.Contains(Key("id2"));
+
+        _fakeDistCache.Seed(Key("id1"), new TestItem { Name = "Changed" }); // proves the read goes to the distributed cache
+
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(storedInDistributed, Is.True);
+            Assert.That(result["id1"]!.Name, Is.EqualTo("Changed"));
+            Assert.That(result["id2"]!.Name, Is.EqualTo("Bob"));
+        };
+    }
+
+    [Test]
+    public async Task DistributedOnly_RemoveAsync_RemovesFromDistributed()
+    {
+        CacheService<TestItem> sut = CreateDistributedOnlyService();
+
+        await sut.SetAsync(new TestItem { Name = "ToRemove" }, "key1");
+
+        await sut.RemoveAsync("key1");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(Key("key1")), Is.False);
+            Assert.That(await sut.GetAsync("key1"), Is.Null);
+        };
+    }
+
+    [Test]
+    public async Task DistributedOnly_RemoveItemsAsync_RemovesFromDistributed()
+    {
+        CacheService<TestItem> sut = CreateDistributedOnlyService();
+
+        await sut.SetAsync(new TestItem { Name = "A" }, "key1");
+        await sut.SetAsync(new TestItem { Name = "B" }, "key2");
+        await sut.SetAsync(new TestItem { Name = "C" }, "key3");
+
+        await sut.RemoveItemsAsync(["key1", "key2"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(Key("key1")), Is.False);
+            Assert.That(_fakeDistCache.Contains(Key("key2")), Is.False);
+            Assert.That(_fakeDistCache.Contains(Key("key3")), Is.True);
+        };
+    }
+
+    [Test]
+    public async Task DistributedOnly_DistributedFailure_DoesNotThrow()
+    {
+        CacheService<TestItem> sut = CreateDistributedOnlyService();
+
+        _fakeDistCache.FailWith = new InvalidOperationException("redis down");
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+        await sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id2"] = new TestItem { Name = "Bob" } });
+
+        TestItem? single = await sut.GetAsync("id1");
+        IDictionary<string, TestItem?> multiple = await sut.GetItemsAsync(["id1", "id2"]);
+
+        await sut.RemoveAsync("id1");
+        await sut.RemoveItemsAsync(["id1", "id2"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(single, Is.Null);
+            Assert.That(multiple["id1"], Is.Null);
+            Assert.That(multiple["id2"], Is.Null);
+        };
+    }
+
+    #endregion
+
+    #region Both layers disabled
+
+    [Test]
+    public async Task BothDurationsZero_RemoveOperations_DoNothing()
+    {
+        CacheService<TestItem> sut = CreateService(memDuration: TimeSpan.Zero, distDuration: TimeSpan.Zero);
+
+        _fakeDistCache.Seed(Key("id1"), new TestItem { Name = "Seeded" });
+
+        await sut.RemoveAsync("id1");
+        await sut.RemoveItemsAsync(["id1"]);
+
+        Assert.That(_fakeDistCache.Contains(Key("id1")), Is.True); // caching is disabled, so nothing is touched
+    }
+
+    #endregion
+
+    #region Synchronous completion (ValueTask)
+
+    [Test]
+    public async Task MemoryOnly_GetAsync_Miss_CompletesSynchronously()
+    {
+        CacheService<TestItem> sut = CreateMemoryOnlyService();
+
+        ValueTask<TestItem?> task = sut.GetAsync("missing");
+        bool isCompleted = task.IsCompletedSuccessfully;
+
+        TestItem? result = await task;
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(isCompleted, Is.True);
+            Assert.That(result, Is.Null);
+        };
+    }
+
+    [Test]
+    public async Task MemoryOnly_GetAsync_Hit_CompletesSynchronously()
+    {
+        CacheService<TestItem> sut = CreateMemoryOnlyService();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        ValueTask<TestItem?> task = sut.GetAsync("id1");
+        bool isCompleted = task.IsCompletedSuccessfully;
+
+        TestItem? result = await task;
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(isCompleted, Is.True);
+            Assert.That(result!.Name, Is.EqualTo("Alice"));
+        };
+    }
+
+    [Test]
+    public async Task MemoryOnly_GetAsync_WithoutSuffix_CompletesSynchronously()
+    {
+        CacheService<TestItem> sut = CreateMemoryOnlyService();
+
+        await sut.SetAsync(new TestItem { Name = "Config" });
+
+        ValueTask<TestItem?> task = sut.GetAsync();
+        bool isCompleted = task.IsCompletedSuccessfully;
+
+        TestItem? result = await task;
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(isCompleted, Is.True);
+            Assert.That(result!.Name, Is.EqualTo("Config"));
+        };
+    }
+
+    [Test]
+    public async Task MemoryOnly_GetItemsAsync_CompletesSynchronously()
+    {
+        CacheService<TestItem> sut = CreateMemoryOnlyService();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        ValueTask<IDictionary<string, TestItem?>> task = sut.GetItemsAsync(["id1", "missing"]);
+        bool isCompleted = task.IsCompletedSuccessfully;
+
+        IDictionary<string, TestItem?> result = await task;
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(isCompleted, Is.True);
+            Assert.That(result["id1"]!.Name, Is.EqualTo("Alice"));
+            Assert.That(result["missing"], Is.Null);
+        };
+    }
+
+    [Test]
+    public async Task MemoryOnly_SetAsync_CompletesSynchronously()
+    {
+        CacheService<TestItem> sut = CreateMemoryOnlyService();
+
+        ValueTask task = sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+        bool isCompleted = task.IsCompletedSuccessfully;
+
+        await task;
+
+        Assert.That(isCompleted, Is.True);
+    }
+
+    [Test]
+    public async Task MemoryOnly_SetItemsAsync_CompletesSynchronously()
+    {
+        CacheService<TestItem> sut = CreateMemoryOnlyService();
+
+        ValueTask task = sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id1"] = new TestItem { Name = "Alice" } });
+        bool isCompleted = task.IsCompletedSuccessfully;
+
+        await task;
+
+        Assert.That(isCompleted, Is.True);
+    }
+
+    [Test]
+    public async Task MemoryOnly_RemoveAsync_CompletesSynchronously()
+    {
+        CacheService<TestItem> sut = CreateMemoryOnlyService();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        ValueTask task = sut.RemoveAsync("id1");
+        bool isCompleted = task.IsCompletedSuccessfully;
+
+        await task;
+
+        Assert.That(isCompleted, Is.True);
+    }
+
+    [Test]
+    public async Task MemoryOnly_RemoveItemsAsync_CompletesSynchronously()
+    {
+        CacheService<TestItem> sut = CreateMemoryOnlyService();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        ValueTask task = sut.RemoveItemsAsync(["id1", "id2"]);
+        bool isCompleted = task.IsCompletedSuccessfully;
+
+        await task;
+
+        Assert.That(isCompleted, Is.True);
+    }
+
+    [Test]
+    public async Task Mixed_GetAsync_MemoryHit_CompletesSynchronously()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        ValueTask<TestItem?> task = sut.GetAsync("id1");
+        bool isCompleted = task.IsCompletedSuccessfully;
+
+        TestItem? result = await task;
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(isCompleted, Is.True);
+            Assert.That(result!.Name, Is.EqualTo("Alice"));
+        };
+    }
+
+    [Test]
+    public async Task BothDurationsZero_AllOperations_CompleteSynchronously()
+    {
+        CacheService<TestItem> sut = CreateService(memDuration: TimeSpan.Zero, distDuration: TimeSpan.Zero);
+
+        ValueTask<TestItem?> get = sut.GetAsync("id1");
+        bool getCompleted = get.IsCompletedSuccessfully;
+        await get;
+
+        ValueTask<IDictionary<string, TestItem?>> getItems = sut.GetItemsAsync(["id1"]);
+        bool getItemsCompleted = getItems.IsCompletedSuccessfully;
+        await getItems;
+
+        ValueTask set = sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+        bool setCompleted = set.IsCompletedSuccessfully;
+        await set;
+
+        ValueTask setItems = sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id1"] = new TestItem { Name = "Alice" } });
+        bool setItemsCompleted = setItems.IsCompletedSuccessfully;
+        await setItems;
+
+        ValueTask remove = sut.RemoveAsync("id1");
+        bool removeCompleted = remove.IsCompletedSuccessfully;
+        await remove;
+
+        ValueTask removeItems = sut.RemoveItemsAsync(["id1"]);
+        bool removeItemsCompleted = removeItems.IsCompletedSuccessfully;
+        await removeItems;
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(getCompleted, Is.True);
+            Assert.That(getItemsCompleted, Is.True);
+            Assert.That(setCompleted, Is.True);
+            Assert.That(setItemsCompleted, Is.True);
+            Assert.That(removeCompleted, Is.True);
+            Assert.That(removeItemsCompleted, Is.True);
+        };
     }
 
     #endregion
@@ -376,76 +1070,196 @@ internal sealed class CacheServiceTests
     #region Validations
 
     [Test]
-    public void GetItemAsync_WithoutDistributedCache_ThrowsInvalidOperationException()
-    {
-        CacheService<TestItem> sut = CreateService(includeDistributedCache: false);
-
-        Assert.ThrowsAsync<InvalidOperationException>(() => sut.GetItemAsync());
-    }
-
-    [Test]
-    public void GetItemsAsync_NullSuffixes_ThrowsArgumentNullException()
+    public async Task GetAsync_NullSuffix_ThrowsArgumentNullException()
     {
         CacheService<TestItem> sut = CreateService();
 
-        Assert.ThrowsAsync<ArgumentNullException>(() => sut.GetItemsAsync<string>(cacheKeySuffixes: null!));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => sut.GetAsync<string>(null!).AsTask());
     }
 
     [Test]
-    public void GetItemsAsync_EmptySuffixes_ThrowsArgumentException()
+    public async Task SetAsync_NullSuffix_ThrowsArgumentNullException()
     {
         CacheService<TestItem> sut = CreateService();
 
-        Assert.ThrowsAsync<ArgumentException>(() => sut.GetItemsAsync(cacheKeySuffixes: Array.Empty<string>()));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => sut.SetAsync(new TestItem(), (string)null!).AsTask());
     }
 
     [Test]
-    public void SetItemsAsync_ItemWithNullValue_ThrowsArgumentNullException()
+    public async Task SetAsync_NullItem_ThrowsArgumentNullException()
     {
         CacheService<TestItem> sut = CreateService();
 
-        Assert.ThrowsAsync<ArgumentNullException>(() => sut.SetItemsAsync(items: new Dictionary<string, TestItem> { ["key"] = null! }));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => sut.SetAsync(null!, "id1").AsTask());
     }
 
     [Test]
-    public void GetItemAsync_NullTenantIdWithNoDefaultTenant_ThrowsArgumentNullException()
-    {
-        IOptions<CacheServerOptions> serverOptions = Options.Create(new CacheServerOptions { TenantId = null });
-        IOptions<CacheOptions<TestItem>> cacheOptions = Options.Create(new CacheOptions<TestItem>
-        {
-            CacheKey = CacheKey,
-            MemoryCacheDuration = TimeSpan.FromMinutes(5),
-            DistributedCacheDuration = TimeSpan.FromMinutes(10),
-        });
-
-        CacheService<TestItem> sut = new(serverOptions, cacheOptions, _memoryCache, NullLogger<TestItem>.Instance, _fakeDistCache);
-
-        Assert.ThrowsAsync<ArgumentNullException>(() => sut.GetItemAsync());
-    }
-
-    [Test]
-    public void GetItemAsync_InvalidTenantIdOverrideCharacters_ThrowsArgumentException()
+    public async Task RemoveAsync_NullSuffix_ThrowsArgumentNullException()
     {
         CacheService<TestItem> sut = CreateService();
 
-        Assert.ThrowsAsync<ArgumentException>(() => sut.GetItemAsync(tenantId: "invalid tenant!"));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => sut.RemoveAsync<string>(null!).AsTask());
     }
 
     [Test]
-    public void GetItemAsync_TenantIdOverrideTooLong_ThrowsArgumentException()
+    public async Task GetItemsAsync_NullSuffixes_ThrowsArgumentNullException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => sut.GetItemsAsync<string>(cacheKeySuffixes: null!).AsTask());
+    }
+
+    [Test]
+    public async Task GetItemsAsync_EmptySuffixes_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetItemsAsync(Array.Empty<string>()).AsTask());
+    }
+
+    [Test]
+    public async Task GetItemsAsync_BlankSuffix_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetItemsAsync(["id1", " "]).AsTask());
+    }
+
+    [Test]
+    public async Task GetItemsAsync_NullElementInSuffixes_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetItemsAsync(new string[] { "id1", null! }).AsTask());
+    }
+
+    [Test]
+    public async Task RemoveItemsAsync_NullSuffixes_ThrowsArgumentNullException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => sut.RemoveItemsAsync<string>(cacheKeySuffixes: null!).AsTask());
+    }
+
+    [Test]
+    public async Task RemoveItemsAsync_EmptySuffixes_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.RemoveItemsAsync(Array.Empty<string>()).AsTask());
+    }
+
+    [Test]
+    public async Task RemoveItemsAsync_BlankSuffix_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.RemoveItemsAsync(["id1", ""]).AsTask());
+    }
+
+    [Test]
+    public async Task SetItemsAsync_NullItems_ThrowsArgumentNullException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => sut.SetItemsAsync<string>(items: null!).AsTask());
+    }
+
+    [Test]
+    public async Task SetItemsAsync_EmptyItems_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.SetItemsAsync(new Dictionary<string, TestItem>()).AsTask());
+    }
+
+    [Test]
+    public async Task SetItemsAsync_BlankKey_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.SetItemsAsync(new Dictionary<string, TestItem> { ["  "] = new TestItem() }).AsTask());
+    }
+
+    [Test]
+    public async Task SetItemsAsync_ItemWithNullValue_ThrowsArgumentNullException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => sut.SetItemsAsync(new Dictionary<string, TestItem> { ["key"] = null! }).AsTask());
+    }
+
+    [Test]
+    public async Task GetAsync_CanceledToken_ThrowsOperationCanceledException()
+    {
+        CacheService<TestItem> sut = CreateService();
+        using CancellationTokenSource cancellationTokenSource = new();
+        cancellationTokenSource.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => sut.GetAsync(cancellationToken: cancellationTokenSource.Token).AsTask());
+    }
+
+    [Test]
+    public async Task SetAsync_CanceledToken_ThrowsOperationCanceledException()
+    {
+        CacheService<TestItem> sut = CreateService();
+        using CancellationTokenSource cancellationTokenSource = new();
+        cancellationTokenSource.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => sut.SetAsync(new TestItem(), cancellationToken: cancellationTokenSource.Token).AsTask());
+    }
+
+    [Test]
+    public async Task RemoveItemsAsync_CanceledToken_ThrowsOperationCanceledException()
+    {
+        CacheService<TestItem> sut = CreateService();
+        using CancellationTokenSource cancellationTokenSource = new();
+        cancellationTokenSource.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => sut.RemoveItemsAsync(["id1"], cancellationToken: cancellationTokenSource.Token).AsTask());
+    }
+
+    [Test]
+    public async Task GetAsync_NullTenantIdWithNoDefaultTenant_ThrowsArgumentNullException()
+    {
+        CacheService<TestItem> sut = CreateService(tenantId: null);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => sut.GetAsync().AsTask());
+    }
+
+    [Test]
+    public async Task GetAsync_NullGlobalTenantWithTenantOverride_Works()
+    {
+        CacheService<TestItem> sut = CreateService(tenantId: null);
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, tenantId: "tenant-a");
+
+        Assert.That((await sut.GetAsync(tenantId: "tenant-a"))!.Name, Is.EqualTo("Alice"));
+    }
+
+    [Test]
+    public async Task GetAsync_InvalidTenantIdOverrideCharacters_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetAsync(tenantId: "invalid tenant!").AsTask());
+    }
+
+    [Test]
+    public async Task GetAsync_TenantIdOverrideTooLong_ThrowsArgumentException()
     {
         CacheService<TestItem> sut = CreateService();
         string tenantId = new('a', 51);
 
-        Assert.ThrowsAsync<ArgumentException>(() => sut.GetItemAsync(tenantId: tenantId));
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetAsync(tenantId: tenantId).AsTask());
     }
 
     [Test]
-    public void GetItemAsync_EmptyTenantIdOverride_ThrowsArgumentException()
+    public async Task GetAsync_EmptyTenantIdOverride_ThrowsArgumentException()
     {
         CacheService<TestItem> sut = CreateService();
 
-        Assert.ThrowsAsync<ArgumentException>(() => sut.GetItemAsync(tenantId: string.Empty));
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetAsync(tenantId: string.Empty).AsTask());
     }
 
     #endregion

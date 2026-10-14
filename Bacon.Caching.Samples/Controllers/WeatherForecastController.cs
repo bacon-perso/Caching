@@ -14,7 +14,7 @@ public class WeatherForecastController(ICacheService<WeatherForecast> weatherFor
     ];
 
     [HttpGet(Name = "GetWeatherForecast")]
-    public async Task<IEnumerable<WeatherForecast>> GetAsync()
+    public async Task<IEnumerable<WeatherForecast>> GetAsync(CancellationToken cancellationToken)
     {
         WeatherForecast[] weatherForecasts = [.. Enumerable.Range(1, 5).Select(index => new WeatherForecast
         {
@@ -30,13 +30,11 @@ public class WeatherForecastController(ICacheService<WeatherForecast> weatherFor
             weatherDic.Add(idx, weatherForecasts[idx -1]);
         }
 
-        weatherForecastCacheService.SetMemoryItems(weatherDic);
+        await weatherForecastCacheService.SetItemsAsync(weatherDic, cancellationToken: cancellationToken);
 
-        IDictionary<int, WeatherForecast?> weatherCacheDic = weatherForecastCacheService.GetMemoryItems(weatherDic.Select(s => s.Key));
+        IDictionary<int, WeatherForecast?> weatherCacheDic = await weatherForecastCacheService.GetItemsAsync(weatherDic.Select(s => s.Key), cancellationToken: cancellationToken);
 
-        await weatherForecastCacheService.SetDistributedItemsAsync(weatherDic);
-
-        IDictionary<int, WeatherForecast?> weatherCacheDicDistributed = await weatherForecastCacheService.GetDistributedItemsAsync(weatherDic.Select(s => s.Key));
+        WeatherForecast? weatherForecast = await weatherForecastCacheService.GetAsync(1, tenantId: Constants.TenantId, cancellationToken: cancellationToken);
 
         return weatherForecasts;
     }

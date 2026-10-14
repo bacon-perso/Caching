@@ -4,31 +4,25 @@ internal interface IDistributedCacheService<TItem>
 {
     #region Get
 
-    Task<TItem?> GetItemAsync(string key);
+    Task<TItem?> GetAsync(string key, CancellationToken cancellationToken = default);
 
-    Task<Dictionary<string, TItem?>> GetItemsAsync(IEnumerable<string> keys);
+    Task<Dictionary<string, TItem?>> GetItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default);
 
     #endregion Get
 
     #region Set
 
-    Task SetItemAsync(string key, TItem value, TimeSpan cacheDuration);
+    Task SetAsync(string key, TItem value, TimeSpan cacheDuration, CancellationToken cancellationToken = default);
 
-    Task SetItemsAsync(IDictionary<string, TItem> dicKeyValues, TimeSpan cacheDuration);
+    Task SetItemsAsync(IDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default);
 
     #endregion Set
 
     #region Remove
 
-    Task RemoveItemAsync(string key);
+    Task RemoveAsync(string key, CancellationToken cancellationToken = default);
 
-    Task RemoveItemsAsync(IEnumerable<string> keys);
+    Task RemoveItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default);
 
     #endregion Remove
-
-    #region Flush
-
-    Task FlushItemsAsync(string keyPattern);
-
-    #endregion Flush
 }
