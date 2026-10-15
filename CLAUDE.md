@@ -73,7 +73,7 @@ ICacheService<T>  (public, open-generic singleton)
 - The no-suffix form targets a single item stored at `{tenantId}_{CacheKey}` (for example a configuration object).
 - `tenantId` is optional on every method (falls back to `CacheServerOptions.TenantId`); `cancellationToken` is last.
 - **Overload resolution:** `GetAsync(string? tenantId)` and `GetAsync<TSuffix>(TSuffix suffix, string? tenantId)` are ambiguous for a string argument. The suffix overloads are marked `[OverloadResolutionPriority(1)]`, so a positional string is a *suffix*; pass the tenant by name (`GetAsync(tenantId: "abc")`). The attribute is not inherited, so it must be repeated on both `ICacheService<T>` and `CacheService<T>` (and only matters for calls through the concrete type when forgotten, where `sut.GetAsync("x")` becomes ambiguous).
-- The suffix is converted with `ToString()`, so it must be deterministic. Null suffixes/items throw `ArgumentNullException`. Plural methods de-duplicate suffixes and reject empty collections and null/blank suffixes (`ArgumentException`).
+- The suffix is converted with `ToString()`, so it must be deterministic. Null suffixes/items throw `ArgumentNullException`. Plural methods de-duplicate suffixes, return immediately for empty collections (nothing is read, written or removed; `GetItemsAsync` returns an empty dictionary) and reject null/blank suffixes (`ArgumentException`).
 - `IDistributedCacheService<T>` (internal, `Task`-based, string keys) mirrors this with `GetAsync`, `GetItemsAsync`, `SetAsync`, `SetItemsAsync`, `RemoveAsync`, `RemoveItemsAsync`.
 
 ### Layer ordering and error handling
@@ -102,8 +102,9 @@ Two separate `JsonSerializerOptions` instances are built in the constructor:
 `RedisCacheService` splits large operations into batches and processes up to 2 batches concurrently with `Parallel.ForEachAsync` (honoring the cancellation token between batches):
 
 - `GetItemsAsync` reads in `MGET` batches of `RedisCacheOptions.GetBatchSize`; each batch writes into its own index range of a pre-sized array (lock-free), then the dictionary is built.
-- `SetItemsAsync` uses `InsertBatchSize`; each key is written with `SET key value EX` (atomic with its TTL, pipelined, `FireAndForget`). Do not use `MSET` + `EXPIRE` (not atomic: a failure in between leaves keys without a TTL).
-- `RemoveItemsAsync` uses `RemoveBatchSize` (`DEL` per batch). Batched removal is not atomic: if a batch fails, earlier batches stay deleted; the error is logged and the memory cache is still cleared.
+- `SetItemsAsync` uses `InsertBatchSize`; each chunk is serialized first, then every key is written with `SET key value EX` (atomic with its TTL, pipelined, awaited: no `FireAndForget`, so Redis-side errors surface). Do not use `MSET` + `EXPIRE` (not atomic: a failure in between leaves keys without a TTL).
+- `RemoveItemsAsync` uses `RemoveBatchSize` (`DEL` per batch). Batched removal is not atomic.
+- **Failures are per batch** (set and remove): each batch has its own `try/catch` (with its own `ValidateIsConnected`), so a failing batch never stops the others. Failures are collected in a `ConcurrentQueue<Exception>` and thrown once at the end as an `AggregateException` ("N of M batches failed"); `CacheService` logs it and still runs the memory operation. `OperationCanceledException` is not collected. The `ValidateIsConnected` before the loop throws a single exception instead.
 
 ### No flush operation
 

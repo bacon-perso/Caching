@@ -127,7 +127,7 @@ IDictionary<int, WeatherForecast?> results = await weatherForecastCacheService.G
 await weatherForecastCacheService.RemoveItemsAsync([1, 2, 3], cancellationToken: cancellationToken);
 ```
 
-Duplicate suffixes are ignored. The collections cannot be null or empty, suffixes cannot be null or blank, and `SetItemsAsync` values cannot be null.
+Duplicate suffixes are ignored. The collections cannot be null; an empty collection does nothing (`GetItemsAsync` returns an empty dictionary). Suffixes cannot be null or blank, and `SetItemsAsync` values cannot be null.
 
 In Redis these operations are executed in batches (`GetBatchSize`, `InsertBatchSize`, `RemoveBatchSize`, up to two batches concurrently) so very large collections do not block the server.
 
@@ -161,7 +161,7 @@ This resolution is implemented with `[OverloadResolutionPriority(1)]` on the suf
 
 Items are always removed by explicit key through `RemoveAsync` (no suffix), `RemoveAsync(suffix)` and `RemoveItemsAsync(suffixes)`; there is no prefix or "flush all" operation.
 
-`RemoveItemsAsync` deletes Redis keys in batches of `RemoveBatchSize`, so a failure part-way through can leave some keys removed and others not. The error is logged, and the memory cache is still cleared for every key.
+`RemoveItemsAsync` deletes Redis keys in batches of `RemoveBatchSize`, so a failure can leave some keys removed and others not. A failing batch does not stop the others: every batch is attempted, the failures are logged together, and the memory cache is still cleared for every key.
 
 ## Behavior
 
@@ -174,7 +174,7 @@ Items are always removed by explicit key through `RemoveAsync` (no suffix), `Rem
 
 - **Errors are logged, not thrown.** A failure in either layer (for example Redis being unreachable) is logged and the other layer is still used: a failed Redis write still stores in memory, and a failed Redis removal still clears memory. Invalid arguments and cancellation do throw (see below).
 - **A Redis outage costs latency, not exceptions.** While Redis is down, a read that misses the memory cache has to reach Redis. At best the client already knows it is disconnected and the call fails instantly; at worst the outage has not been detected yet and the call waits for the Redis timeout (`SyncTimeout`, 5 seconds by default). Either way the failure is logged and the read returns `null`, so the outage shows up as a delay at worst, never as an exception. Memory hits are not affected. Be careful when lowering `SyncTimeout` to shorten that worst-case delay: a busy Redis that is simply slower than usual would then start timing out, and its calls would be logged as failures instead of succeeding.
-- **Redis writes are fire-and-forget.** `SetAsync` / `SetItemsAsync` do not wait for Redis to confirm the write, so a completed call does not guarantee the value reached Redis. Each key is written with its TTL in a single atomic command.
+- **Redis writes are awaited.** `SetAsync` / `SetItemsAsync` wait for Redis to confirm the write. Each key is written with its TTL in a single atomic command. `SetItemsAsync` attempts every batch even if one fails; the failures are logged together and the memory cache is still written.
 - **Synchronous completion.** When no distributed I/O is needed (memory-only, a memory hit, or disabled caches) the returned `ValueTask` is already completed, so awaiting it neither allocates a task nor yields.
 - **Cancellation.** The token is checked before an operation starts and between Redis batches; an operation already sent to Redis cannot be interrupted. A canceled token throws `OperationCanceledException`.
 
@@ -183,7 +183,7 @@ Items are always removed by explicit key through `RemoveAsync` (no suffix), `Rem
 | Situation | Exception |
 |---|---|
 | Null suffix, null item, null collection, null value in `SetItemsAsync` | `ArgumentNullException` |
-| Empty collection, null or blank suffix inside a collection | `ArgumentException` |
+| Null or blank suffix inside a collection | `ArgumentException` |
 | No tenant ID passed and no global tenant configured | `ArgumentNullException` |
 | Empty or invalid tenant ID | `ArgumentException` |
 | Canceled `CancellationToken` | `OperationCanceledException` |

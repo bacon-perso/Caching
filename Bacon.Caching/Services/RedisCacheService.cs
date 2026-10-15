@@ -2,6 +2,7 @@
 using Bacon.Caching.Models;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
+using System.Collections.Concurrent;
 
 namespace Bacon.Caching.Services;
 
@@ -10,6 +11,7 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
     #region DI
 
     private readonly RedisCacheOptions _redisCacheOptions = (cacheServerOptionsOptions.Value.DistributedCacheOptions as RedisCacheOptions)!;
+    private static readonly string _connectionErrorMessage = "Error connecting to redis while executing ";
 
     #endregion DI
 
@@ -19,7 +21,7 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        ValidateIsConnected("Error while getting redis item");
+        ValidateIsConnected(_connectionErrorMessage + nameof(GetAsync));
 
         RedisValue redisValue = await database.StringGetAsync(key, CommandFlags.None);
 
@@ -35,7 +37,7 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        ValidateIsConnected("Error while getting redis items");
+        ValidateIsConnected(_connectionErrorMessage + nameof(GetItemsAsync));
 
         string[] cacheKeys = [.. keys];
         TItem?[] values = new TItem?[cacheKeys.Length];
@@ -88,16 +90,21 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        ValidateIsConnected("Error while setting redis item");
+        ValidateIsConnected(_connectionErrorMessage + nameof(SetAsync));
 
-        await database.StringSetAsync(key, cacheSerializerService.Serialize(value), cacheDuration, flags: CommandFlags.FireAndForget);
+        await database.StringSetAsync(key, cacheSerializerService.Serialize(value), cacheDuration);
     }
 
     public async Task SetItemsAsync(IDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        ValidateIsConnected("Error while setting redis items");
+        string errorMessage = _connectionErrorMessage + nameof(SetItemsAsync);
+
+        ValidateIsConnected(errorMessage);
+
+        ConcurrentQueue<Exception> exceptions = [];
+        KeyValuePair<string, TItem>[][] batches = [.. items.Chunk(_redisCacheOptions.InsertBatchSize)];
 
         ParallelOptions parallelOptions = new()
         {
@@ -105,10 +112,24 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
             CancellationToken = cancellationToken
         };
 
-        await Parallel.ForEachAsync(items.Chunk(_redisCacheOptions.InsertBatchSize), parallelOptions, async (batch, _) =>
+        await Parallel.ForEachAsync(batches, parallelOptions, async (batch, _) =>
         {
-            await AddAllAsync(batch, cacheDuration);
+            try
+            {
+                ValidateIsConnected(errorMessage);
+
+                await AddAllAsync(batch, cacheDuration);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                exceptions.Enqueue(ex);
+            }
         });
+
+        if (!exceptions.IsEmpty)
+        {
+            throw new AggregateException($"Error while setting redis items: {exceptions.Count} of {batches.Length} batches failed", exceptions);
+        }
     }
 
     #endregion Set
@@ -119,7 +140,7 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        ValidateIsConnected("Error while removing redis item");
+        ValidateIsConnected(_connectionErrorMessage + nameof(RemoveAsync));
 
         await database.KeyDeleteAsync(key);
     }
@@ -128,14 +149,14 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        ValidateIsConnected("Error while removing redis items");
+        string errorMessage = _connectionErrorMessage + nameof(RemoveItemsAsync);
+
+        ValidateIsConnected(errorMessage);
 
         RedisKey[] redisKeys = [.. keys.Select(s => (RedisKey)s)];
 
-        if (redisKeys.Length == 0)
-        {
-            return;
-        }
+        ConcurrentQueue<Exception> exceptions = [];
+        RedisKey[][] batches = [.. redisKeys.Chunk(_redisCacheOptions.RemoveBatchSize)];
 
         ParallelOptions parallelOptions = new()
         {
@@ -143,25 +164,56 @@ internal sealed class RedisCacheService<TItem>(IOptions<CacheServerOptions> cach
             CancellationToken = cancellationToken
         };
 
-        await Parallel.ForEachAsync(redisKeys.Chunk(_redisCacheOptions.RemoveBatchSize), parallelOptions, async (batch, _) =>
+        await Parallel.ForEachAsync(batches, parallelOptions, async (batch, _) =>
         {
-            await database.KeyDeleteAsync(batch);
+            try
+            {
+                ValidateIsConnected(errorMessage);
+
+                await database.KeyDeleteAsync(batch);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                exceptions.Enqueue(ex);
+            }
         });
+
+        if (!exceptions.IsEmpty)
+        {
+            throw new AggregateException($"Error while removing redis items: {exceptions.Count} of {batches.Length} batches failed", exceptions);
+        }
     }
 
     #endregion Remove
 
     #region Privates
 
-    private async Task AddAllAsync(IEnumerable<KeyValuePair<string, TItem>> items, TimeSpan cacheDuration)
+    private async Task AddAllAsync(KeyValuePair<string, TItem>[] items, TimeSpan cacheDuration)
     {
-        List<Task> tasks = [];
-        foreach (KeyValuePair<string, TItem> item in items)
+        // Serialize the whole chunk first: if one item fails, no command has been sent yet.
+        RedisValue[] values = new RedisValue[items.Length];
+        for (int idx = 0; idx < items.Length; ++idx)
         {
-            tasks.Add(database.StringSetAsync(item.Key, cacheSerializerService.Serialize(item.Value), cacheDuration, when: When.Always, flags: CommandFlags.FireAndForget));
+            values[idx] = cacheSerializerService.Serialize(items[idx].Value);
         }
 
-        await Task.WhenAll(tasks);
+        Task[] tasks = new Task[items.Length];
+        for (int idx = 0; idx < items.Length; ++idx)
+        {
+            tasks[idx] = database.StringSetAsync(items[idx].Key, values[idx], cacheDuration, when: When.Always);
+        }
+
+        // Task.WhenAll rethrows only the first exception when awaited; keep the task so every failure is rethrown together.
+        Task allTasks = Task.WhenAll(tasks);
+
+        try
+        {
+            await allTasks;
+        }
+        catch
+        {
+            throw allTasks.Exception!;
+        }
     }
 
     private void ValidateIsConnected(string message)

@@ -1110,11 +1110,14 @@ internal sealed class CacheServiceTests
     }
 
     [Test]
-    public async Task GetItemsAsync_EmptySuffixes_ThrowsArgumentException()
+    public async Task GetItemsAsync_EmptySuffixes_ReturnsEmptyDictionaryWithoutReadingDistributed()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetItemsAsync(Array.Empty<string>()).AsTask());
+        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(Array.Empty<string>());
+
+        Assert.That(result, Is.Empty);
+        Assert.That(_fakeDistCache.RequestedKeys, Is.Empty);
     }
 
     [Test]
@@ -1142,11 +1145,11 @@ internal sealed class CacheServiceTests
     }
 
     [Test]
-    public async Task RemoveItemsAsync_EmptySuffixes_ThrowsArgumentException()
+    public async Task RemoveItemsAsync_EmptySuffixes_DoesNothing()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await Assert.ThrowsAsync<ArgumentException>(() => sut.RemoveItemsAsync(Array.Empty<string>()).AsTask());
+        await Assert.DoesNotThrowAsync(() => sut.RemoveItemsAsync(Array.Empty<string>()).AsTask());
     }
 
     [Test]
@@ -1166,11 +1169,11 @@ internal sealed class CacheServiceTests
     }
 
     [Test]
-    public async Task SetItemsAsync_EmptyItems_ThrowsArgumentException()
+    public async Task SetItemsAsync_EmptyItems_DoesNothing()
     {
         CacheService<TestItem> sut = CreateService();
 
-        await Assert.ThrowsAsync<ArgumentException>(() => sut.SetItemsAsync(new Dictionary<string, TestItem>()).AsTask());
+        await Assert.DoesNotThrowAsync(() => sut.SetItemsAsync(new Dictionary<string, TestItem>()).AsTask());
     }
 
     [Test]

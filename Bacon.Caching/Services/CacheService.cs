@@ -31,6 +31,8 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
     {
         ArgumentNullException.ThrowIfNull(cacheKeySuffix, nameof(cacheKeySuffix));
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         string source = nameof(GetAsync);
 
         TItem? defaultValue = default;
@@ -39,8 +41,6 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
         {
             return defaultValue;
         }
-
-        cancellationToken.ThrowIfCancellationRequested();
 
         string cacheKey = GetCacheKey(tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
 
@@ -97,9 +97,15 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
     {
         ArgumentNullException.ThrowIfNull(cacheKeySuffixes, nameof(cacheKeySuffixes));
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         string source = nameof(GetItemsAsync);
 
-        cancellationToken.ThrowIfCancellationRequested();
+        if (!cacheKeySuffixes.Any())
+        {
+            LogNoItemsToCacheDebug(source);
+            return new Dictionary<TSuffix, TItem?>();
+        }
 
         TSuffix[] typedSuffixes = [.. cacheKeySuffixes.Distinct()];
 
@@ -201,14 +207,14 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
         ArgumentNullException.ThrowIfNull(cacheKeySuffix, nameof(cacheKeySuffix));
         ArgumentNullException.ThrowIfNull(item, nameof(item));
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         string source = nameof(SetAsync);
 
         if (IsCacheDisabled(source))
         {
             return;
         }
-
-        cancellationToken.ThrowIfCancellationRequested();
 
         string cacheKey = GetCacheKey(tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
 
@@ -243,14 +249,20 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
     {
         ArgumentNullException.ThrowIfNull(items, nameof(items));
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         string source = nameof(SetItemsAsync);
+
+        if (!items.Any())
+        {
+            LogNoItemsToCacheDebug(source);
+            return;
+        }
 
         if (IsCacheDisabled(source))
         {
             return;
         }
-
-        cancellationToken.ThrowIfCancellationRequested();
 
         TSuffix[] typedSuffixes = [.. items.Keys];
 
@@ -301,14 +313,14 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
     {
         ArgumentNullException.ThrowIfNull(cacheKeySuffix, nameof(cacheKeySuffix));
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         string source = nameof(RemoveAsync);
 
         if (IsCacheDisabled(source))
         {
             return;
         }
-
-        cancellationToken.ThrowIfCancellationRequested();
 
         string cacheKey = GetCacheKey(tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
 
@@ -343,14 +355,20 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
     {
         ArgumentNullException.ThrowIfNull(cacheKeySuffixes, nameof(cacheKeySuffixes));
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         string source = nameof(RemoveItemsAsync);
+
+        if (!cacheKeySuffixes.Any())
+        {
+            LogNoItemsToCacheDebug(source);
+            return;
+        }
 
         if (IsCacheDisabled(source))
         {
             return;
         }
-
-        cancellationToken.ThrowIfCancellationRequested();
 
         TSuffix[] typedSuffixes = [.. cacheKeySuffixes.Distinct()];
 
@@ -551,6 +569,9 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Caching - Distributed cache failed for '{Source}'.")]
     private partial void LogDistributedCacheError(string source, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Caching - No item cached for '{Source}'. No items received.")]
+    private partial void LogNoItemsToCacheDebug(string source);
 
     #endregion General
 
