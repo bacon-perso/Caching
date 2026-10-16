@@ -1,4 +1,4 @@
-namespace Bacon.Caching.Models;
+﻿namespace Bacon.Caching.Models;
 
 /// <summary>
 /// Cache options of a single cached type.

@@ -1,4 +1,4 @@
-using Bacon.Caching.Interfaces.Services;
+﻿using Bacon.Caching.Interfaces.Services;
 using Bacon.Caching.Models;
 using Bacon.Caching.Services;
 using Bacon.Caching.Tests.Fakes;
@@ -106,7 +106,9 @@ internal sealed class CacheServiceTests
     [Test]
     public async Task PositionalStringArgument_IsTreatedAsSuffix_OnInterface()
     {
+#pragma warning disable CA1859 // The interface type is deliberate: this test covers the overload resolution through ICacheService<T>
         ICacheService<TestItem> sut = CreateService();
+#pragma warning restore CA1859
 
         await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
 
@@ -126,7 +128,9 @@ internal sealed class CacheServiceTests
     [Test]
     public async Task NamedTenantIdArgument_IsTreatedAsTenant_OnInterface()
     {
+#pragma warning disable CA1859 // The interface type is deliberate: this test covers the overload resolution through ICacheService<T>
         ICacheService<TestItem> sut = CreateService();
+#pragma warning restore CA1859
 
         await sut.SetAsync(new TestItem { Name = "Alice" }, tenantId: "tenant-a");
 

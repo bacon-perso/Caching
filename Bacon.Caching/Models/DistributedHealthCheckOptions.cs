@@ -8,7 +8,7 @@ namespace Bacon.Caching.Models;
 public sealed class DistributedHealthCheckOptions
 {
     /// <summary>
-    /// Defines the unique name of the health check (default value: "redis").
+    /// Defines the unique name of the health check (Provider specific).
     /// </summary>
     public string? Name { get; set; }
 

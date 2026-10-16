@@ -1,4 +1,4 @@
-using Bacon.Caching.Interfaces.Services;
+﻿using Bacon.Caching.Interfaces.Services;
 using System.Collections.Concurrent;
 
 namespace Bacon.Caching.Tests.Fakes;

@@ -14,6 +14,7 @@ dotnet test
 # Run a single test class / test
 dotnet test --filter "FullyQualifiedName~CacheServiceTests"
 dotnet test --filter "FullyQualifiedName~CacheServiceTests.GetItemsAsync_MemoryDisabled_ReturnsDistributedValues"
+dotnet test --filter "FullyQualifiedName~ClusterCacheServiceTests"
 
 # Run the sample API
 dotnet run --project Bacon.Caching.Samples
@@ -21,21 +22,31 @@ dotnet run --project Bacon.Caching.Samples
 
 ## Code style
 
-Always use braces (even for single statements) and explicit types instead of `var`. Files use CRLF line endings in the working tree (`core.autocrlf=true`), except files created by tools, which are LF; keep a file's existing line endings. Files end at their last closing brace, with no trailing newline or empty line.
+Always use braces (even for single statements) and explicit types instead of `var`. Files use CRLF line endings in the working tree (`core.autocrlf=true`), and source files are UTF-8 with BOM. A new file must match: UTF-8 with BOM and CRLF (tools such as Claude Code's Write tool create plain UTF-8 with LF, so add the BOM and convert the line endings afterwards, and re-check a BOM/CRLF file after every edit); keep a file's existing encoding and line endings. Files end at their last closing brace, with no trailing newline or empty line.
 
 ## Architecture
 
-This is a .NET 10 dual-layer caching library. Memory cache is always checked first; on a miss it falls through to distributed (Redis). If Redis is unreachable the library degrades gracefully: errors from either layer are logged (source-generated `[LoggerMessage]`) and not thrown. Argument validation errors and `OperationCanceledException` are thrown.
+This is a .NET 10 dual-layer caching library, split in two packages:
+
+- **`Bacon.Caching`**: the memory cache, `ICacheService<T>`, tenants and scopes, and the contract distributed cache providers implement. It has no dependency on Redis.
+- **`Bacon.Caching.Redis`**: the Redis provider (`AddRedis`). It references `Bacon.Caching`. Other providers can be written the same way (see "Writing a provider").
+
+Memory cache is always checked first; on a miss it falls through to the distributed cache (when a provider is registered). If the distributed cache is unreachable the library degrades gracefully: errors from either layer are logged (source-generated `[LoggerMessage]`) and not thrown. Argument validation errors and `OperationCanceledException` are thrown.
+
+The solution has five projects: `Bacon.Caching`, `Bacon.Caching.Redis`, `Bacon.Caching.Tests`, `Bacon.Caching.Redis.Tests` and `Bacon.Caching.Samples`. A root `Directory.Build.props` sets the shared compiler settings (target framework, nullable, implicit usings, language version, analysis level); `Version`, `GenerateDocumentationFile` and packaging are set per project.
 
 ### DI registration (fluent builder)
 
-Consumers call `AddCache(...)` then chain `.AddItem<T>(...)` once per cached type:
+Consumers call `AddCache(...)`, then chain `AddRedis(...)` (optional) and `.AddItem<T>(...)` once per cached type:
 
 ```csharp
 services.AddCache(o => {
     o.TenantId = "...";
-    o.DistributedCacheType = DistributedCacheTypes.redis;
-    o.DistributedCacheOptions = new RedisCacheOptions { Server = "...", Port = 6379 };
+})
+.AddRedis(o => {
+    o.Server = "...";
+    o.Port = 6379;
+    o.ServerType = RedisServerTypes.Standalone; // or Cluster
 })
 .AddItem<MyClass>(o => {
     o.CacheKey = "prefix_";
@@ -44,15 +55,15 @@ services.AddCache(o => {
 });
 ```
 
-`AddItem<T>` registers `CacheOptions<T>` via `IOptions<CacheOptions<T>>`, so each `ICacheService<T>` gets its own strongly-typed options. Setting either duration to `TimeSpan.Zero` disables that layer for that type. `Scope` (`CacheScopes.Tenant` by default) can be set to `CacheScopes.Global` for data shared by all tenants (tenant data, system information): see "Cache key format".
+`AddItem<T>` registers `CacheOptions<T>` via `IOptions<CacheOptions<T>>`, so each `ICacheService<T>` gets its own strongly-typed options. Setting either duration to `TimeSpan.Zero` disables that layer for that type. `Scope` (`CacheScopes.Tenant` by default) can be set to `CacheScopes.Global` for data shared by all tenants (tenant data, system information): see "Cache key format". Without a provider the distributed layer is skipped (a type with a distributed duration but no provider logs "No distributed cache provider is registered" and keeps working with the memory cache).
 
-Both methods take a `configureOptions` action and throw `ArgumentNullException` for a null argument. Options are validated at registration (`CacheExtensions`):
+All the registration methods take a `configureOptions` action and throw `ArgumentNullException` for a null argument. Options are validated at registration:
 
-- Tenant ID (if set): 1-50 characters of `A-Z a-z 0-9 . _ - :`.
-- `CacheKey`: not empty/whitespace, at most 50 characters. A type can only be configured once. Durations cannot be negative. `Scope` must be a defined `CacheScopes` value.
-- Redis: server without a port, port not 0, `GetBatchSize` / `InsertBatchSize` / `RemoveBatchSize` between 1 and 5000 (default 100).
+- `AddCache` (`CacheExtensions`): tenant ID (if set): 1-50 characters of `A-Z a-z 0-9 . _ - :`.
+- `AddItem` (`CacheExtensions`): `CacheKey` not empty/whitespace, at most 50 characters. A type can only be configured once. Durations cannot be negative. `Scope` must be a defined `CacheScopes` value.
+- `AddRedis` (`RedisCacheExtensions`): a distributed provider must not already be registered (`InvalidOperationException`, checked first, before the options action runs); server not empty/whitespace and without a port, port not 0, `ServerType` a defined `RedisServerTypes` value, `AdditionalEndpoints` (if not null/empty) only with `ServerType` `Cluster` and each endpoint non-null with a server not empty/whitespace and without a port, and a port not 0 (a null port uses the main `Port`), `GetBatchSize` / `InsertBatchSize` / `RemoveBatchSize` between 1 and 5000 (default 100).
 
-`AddCache` creates the Redis connection during registration (`AbortOnConnectFail = false`).
+`AddRedis` creates the Redis connection during registration (`AbortOnConnectFail = false`), so an unreachable Redis does not stop the application from starting. Right after connecting it compares the configured `ServerType` with the type the connected servers report (`CheckServerType`) and logs a warning in both mismatch cases: `Standalone` configured for a cluster (multi-key calls would fail) and `Cluster` configured for a standalone server (it works, with a small overhead). It only logs: it needs a `LoggerFactory` and a connected server, and never changes behavior. The multiplexer and its database are wrapped in an internal `RedisCacheConnection` registered with a factory (so the container disposes it), and are not registered on their own, so they cannot collide with the consumer's own `IDatabase` / `ConnectionMultiplexer`. The validated options instance is registered as `IOptions<RedisCacheOptions>`.
 
 ### Service layering
 
@@ -60,11 +71,15 @@ Both methods take a `configureOptions` action and throw `ArgumentNullException` 
 ICacheService<T>  (public, open-generic singleton)
     └─ CacheService<T>          — orchestrates memory + distributed
         ├─ IMemoryCache          — Microsoft.Extensions.Caching.Memory
-        └─ IDistributedCacheService<T>  (internal, optional)
-               └─ RedisCacheService<T>  — StackExchange.Redis
-                       └─ ICacheSerializerService
-                              └─ CacheSerializerService  — System.Text.Json
+        └─ IDistributedCacheService<T>  (public provider contract, optional: registered by a provider package)
+               └─ BaseRedisCacheService<T>   — Bacon.Caching.Redis: shared logic over RedisCacheConnection
+                       ├─ StandaloneCacheService<T>   — ServerType Standalone: MGET / DEL batches
+                       └─ ClusterCacheService<T>      — ServerType Cluster: slot-grouped, pipelined waves
+ICacheSerializerService (public, used by providers)
+    └─ CacheSerializerService  — System.Text.Json
 ```
+
+`AddRedis` registers the open generic `IDistributedCacheService<>` with `StandaloneCacheService<>` or `ClusterCacheService<>` according to `RedisCacheOptions.ServerType`. The user declares the topology: nothing is detected at runtime.
 
 ### Public API shape
 
@@ -74,13 +89,22 @@ ICacheService<T>  (public, open-generic singleton)
 - `tenantId` is optional on every method (falls back to `CacheServerOptions.TenantId`); `cancellationToken` is last. For `CacheScopes.Global` types it must be null: passing one throws `ArgumentException`.
 - **Overload resolution:** `GetAsync(string? tenantId)` and `GetAsync<TSuffix>(TSuffix suffix, string? tenantId)` are ambiguous for a string argument. The suffix overloads are marked `[OverloadResolutionPriority(1)]`, so a positional string is a *suffix*; pass the tenant by name (`GetAsync(tenantId: "abc")`). The attribute is not inherited, so it must be repeated on both `ICacheService<T>` and `CacheService<T>` (and only matters for calls through the concrete type when forgotten, where `sut.GetAsync("x")` becomes ambiguous).
 - The suffix is converted with `ToString()`, so it must be deterministic. Null suffixes/items throw `ArgumentNullException`. Plural methods de-duplicate suffixes, return immediately for empty collections (nothing is read, written or removed; `GetItemsAsync` returns an empty dictionary) and reject null/blank suffixes (`ArgumentException`).
-- `IDistributedCacheService<T>` (internal, `Task`-based, string keys) mirrors this with `GetAsync`, `GetItemsAsync`, `SetAsync`, `SetItemsAsync`, `RemoveAsync`, `RemoveItemsAsync`.
+- `IDistributedCacheService<T>` (public, `Task`-based, string keys) mirrors this with `GetAsync`, `GetItemsAsync`, `SetAsync`, `SetItemsAsync`, `RemoveAsync`, `RemoveItemsAsync`.
+
+### Writing a provider
+
+A distributed provider lives in its own package that references `Bacon.Caching`, and exposes an `AddXxx(this CacheBuilder, Action<XxxOptions>)` extension. It must:
+
+- Implement the open generic `IDistributedCacheService<TItem>` (the keys it receives are the final cache keys) and register it with `cacheBuilder.Services.AddSingleton(typeof(IDistributedCacheService<>), typeof(XxxService<>))`.
+- Check first that no `IDistributedCacheService<>` is registered yet and throw `InvalidOperationException` otherwise (the check is inline in each provider; there is deliberately no shared helper). A closed registration for one type is not a conflict: DI resolves it before the open generic.
+- Use `ICacheSerializerService` if it stores text. Its options class can implement `IDistributedCacheOptions` (`Server`, `Password`, `LoggerFactory`, `HealthCheckOptions`), and `DistributedHealthCheckOptions` is shared; the provider supplies the defaults (Redis: name `redis`, status `Degraded`, tags `Cache`).
+- Validate its options eagerly, before connecting or registering anything, and throw the usual argument exceptions.
 
 ### Layer ordering and error handling
 
-Reads check memory, then distributed, and backfill memory on a distributed hit (also when only the distributed layer returns values: memory disabled means the values are returned without being written to memory). Writes and removals do the distributed layer first, then memory, each in its **own** `try/catch`, so a Redis failure never skips the memory operation (a failed removal must not leave stale memory entries). `ValidateDistributedCache()` ("Distributed cache not initialized") runs inside the distributed `try`, so a missing service is logged, not thrown. Cache keys are built **before** either `try` (`SetItemsAsync` builds one key/item dictionary shared by both layers), so argument errors are thrown instead of logged: an invalid or missing tenant ID, a tenant ID passed to a global type, or two suffixes with the same string representation.
+Reads check memory, then distributed, and backfill memory on a distributed hit (also when only the distributed layer returns values: memory disabled means the values are returned without being written to memory). Writes and removals do the distributed layer first, then memory, each in its **own** `try/catch`, so a Redis failure never skips the memory operation (a failed removal must not leave stale memory entries). `ValidateDistributedCache()` ("No distributed cache provider is registered...") runs inside the distributed `try`, so a missing service is logged, not thrown. Cache keys are built **before** either `try` (`SetItemsAsync` builds one key/item dictionary shared by both layers), so argument errors are thrown instead of logged: an invalid or missing tenant ID, a tenant ID passed to a global type, or two suffixes with the same string representation.
 
-Redis outage behavior: at startup the failure is logged (if a `LoggerFactory` is configured) and the client's retries can slow startup slightly. At runtime a read that misses memory still has to reach Redis: at best `RedisCacheService.ValidateIsConnected` fails it instantly, at worst (outage not yet detected) it waits for the Redis timeout (`RedisCacheOptions.SyncTimeout`, applied to sync and async operations) before failing, being logged and returning null. The cost of an outage is latency, not exceptions.
+Redis outage behavior: at startup the failure is logged (if a `LoggerFactory` is configured) and the client's retries can slow startup slightly. At runtime a read that misses memory still has to reach Redis: at best `BaseRedisCacheService.ValidateIsConnected` fails it instantly, at worst (outage not yet detected) it waits for the Redis timeout (`RedisCacheOptions.SyncTimeout`, applied to sync and async operations) before failing, being logged and returning null. The cost of an outage is latency, not exceptions.
 
 ### Cache key format
 
@@ -90,30 +114,41 @@ Redis outage behavior: at startup the failure is logged (if a `LoggerFactory` is
 
 ### Serialization pipeline (`CacheSerializerService`)
 
-Two separate `JsonSerializerOptions` instances are built in the constructor:
-
-- **Serialize** — uses `IgnoreJsonIgnoreAttributesModifier`: manually rebuilds all public readable properties, intentionally bypassing `[JsonIgnore]` so every field is written to Redis.
-- **Deserialize** — uses `TOtoModifier`: rewrites each `JsonPropertyInfo.Name` back to the CLR member name (undoes any `[JsonPropertyName]` rename) so JSON keys match the actual property names.
-
-`JsonResolverExtensions` in `Bacon.Caching/DataContracts/` contains these two modifiers.
+One `JsonSerializerOptions` instance is built in the constructor, with `IgnoreJsonIgnoreAttributesModifier` (in `Bacon.Caching/DataContracts/JsonResolverExtensions.cs`): it manually rebuilds all public readable properties using their CLR names, intentionally bypassing both `[JsonIgnore]` and `[JsonPropertyName]` so every field is written to Redis and read back. The same options are used to serialize and deserialize.
 
 ### Redis batching
 
-`RedisCacheService` splits large operations into batches and processes up to 2 batches concurrently with `Parallel.ForEachAsync` (honoring the cancellation token between batches):
+The services differ only in how several keys are handled (`GetItemsAsync`, `RemoveItemsAsync`); everything else is in `BaseRedisCacheService`. `MaxParallelBatches` (2) is the shared concurrency constant.
 
-- `GetItemsAsync` reads in `MGET` batches of `RedisCacheOptions.GetBatchSize`; each batch writes into its own index range of a pre-sized array (lock-free), then the dictionary is built.
-- `SetItemsAsync` uses `InsertBatchSize`; each chunk is serialized first, then every key is written with `SET key value EX` (atomic with its TTL, pipelined, awaited: no `FireAndForget`, so Redis-side errors surface). Do not use `MSET` + `EXPIRE` (not atomic: a failure in between leaves keys without a TTL).
+**Standalone** (`StandaloneCacheService`): splits the work into batches and processes up to `MaxParallelBatches` of them concurrently with `Parallel.ForEachAsync` (honoring the cancellation token between batches):
+
+- `GetItemsAsync` reads in `MGET` batches of `GetBatchSize`; each batch writes into its own index range of a pre-sized array (lock-free), then the dictionary is built.
 - `RemoveItemsAsync` uses `RemoveBatchSize` (`DEL` per batch). Batched removal is not atomic.
-- **Failures are per batch** (set and remove): each batch has its own `try/catch` (with its own `ValidateIsConnected`), so a failing batch never stops the others. Failures are collected in a `ConcurrentQueue<Exception>` and thrown once at the end as an `AggregateException` ("N of M batches failed"); `CacheService` logs it and still runs the memory operation. `OperationCanceledException` is not collected. The `ValidateIsConnected` before the loop throws a single exception instead.
+
+**Cluster** (`ClusterCacheService`): a Redis Cluster rejects (`CROSSSLOT`) a command whose keys are not all in the same hash slot, even on the same node, and our keys differ by suffix. So the keys are grouped by `ConnectionMultiplexer.HashSlot` (`CreateBatches`, which keeps each key's original index) and chunked by batch size, which with random suffixes often gives one-key batches. The batches are then sent in waves (`CreateWaves`): a wave holds at most `batch size * MaxParallelBatches` keys, all its commands are started before any reply is awaited (pipelined), and the next wave starts once the whole wave is done. That keeps the keys in flight bounded by the batch size option (the same bound as standalone) while avoiding one round trip per tiny batch. `GetBatchAsync` fills `values[batch[idx].Index]`, so it stays lock-free and keeps the original key order. Hash tags in the key are deliberately not used (they would change the key format and put a tenant on one shard).
+
+**Both:**
+
+- `SetItemsAsync` (in the base class) uses `InsertBatchSize`; each chunk is serialized first, then every key is written with `SET key value EX` (atomic with its TTL, pipelined, awaited: no `FireAndForget`, so Redis-side errors surface). Single-key commands are valid in a cluster, so it needs no split. Do not use `MSET` + `EXPIRE` (not atomic: a failure in between leaves keys without a TTL).
+- **Failures are per batch** (set and remove): each batch has its own `try/catch` (with its own `ValidateIsConnected`), so a failing batch never stops the others. Failures are collected in a `ConcurrentQueue<Exception>` and thrown once at the end as an `AggregateException` ("N of M batches failed", `ThrowIfAnyFailed`); `CacheService` logs it and still runs the memory operation. `OperationCanceledException` is not collected. The `ValidateIsConnected` before the loop throws a single exception instead.
+- `ServerType` is declared in `RedisCacheOptions`. `Cluster` on a standalone server works (`HashSlot` returns `-1`, so there is a single group) with a small overhead (the grouping and the pipelined waves instead of the plain `MGET` / `DEL` loop), while `Standalone` on a cluster fails the multi-key calls (logged, results missing): hence the startup diagnostic, which warns in both directions. The cluster path is covered by unit tests of the batching helpers but has not been run against a live cluster yet. `Server` / `Port` is the main seed node; `RedisCacheOptions.AdditionalEndpoints` (`RedisEndpoint`: `Server`, optional `Port` defaulting to the main `Port`) adds more seed nodes, only with `ServerType` `Cluster`, so the connection can start when the main node is down (the rest of the cluster is discovered from any reachable seed).
 
 ### No flush operation
 
 There is intentionally no prefix/"flush all" operation (it was removed along with the Lua `SCAN` script, the `AllowAdmin` Redis option and the reflection into `MemoryCache` internals). Items are removed by explicit key via `RemoveAsync` / `RemoveItemsAsync`.
 
-### Test project
+### Test projects
 
-`Bacon.Caching.Tests` uses NUnit 4 (`Assert.ThrowsAsync` must be awaited; `ValueTask` results need `.AsTask()` for it).
+Both use NUnit 4 (`Assert.ThrowsAsync` must be awaited; `ValueTask` results need `.AsTask()` for it).
+
+**`Bacon.Caching.Tests`**
 
 - `CacheServiceTests` runs `CacheService<T>` against a real `MemoryCache` and `Fakes/FakeDistributedCacheService<T>`. The fake exposes `Seed`, `Clear`, `Contains`, `RequestedKeys` (keys asked of `GetItemsAsync`) and `FailWith` (makes every operation throw, to test graceful degradation). Tests call the concrete class positionally and through `ICacheService<T>` to cover the overload-resolution rule above. The three modes are covered separately (memory only, distributed only, mixed), plus both layers disabled and the global scope (key shape, no tenant required, no collision with tenant keys, tenant ID rejected); the "Synchronous completion" tests assert `IsCompletedSuccessfully` on the returned `ValueTask` before awaiting it, which protects the allocation-free memory-only/memory-hit path.
-- `CacheExtensionsTests` covers registration validation. It must not use valid Redis options (that would try to connect).
-- `RedisCacheService` (batching, `SET EX`) has no unit tests: it takes a concrete `ConnectionMultiplexer` and `IDatabase`, so it needs a real Redis or an abstraction seam first.
+- `CacheExtensionsTests` covers the `AddCache` / `AddItem` registration validation.
+
+**`Bacon.Caching.Redis.Tests`** (sees the internals of `Bacon.Caching.Redis` through `InternalsVisibleTo`)
+
+- `RedisCacheExtensionsTests` covers `AddRedis` validation. It must not use valid Redis options (that would try to connect), so the provider-already-registered check, the null arguments and every invalid option are tested, but not a successful registration.
+- `ClusterCacheServiceTests` covers the pure `CreateBatches` / `CreateWaves` helpers (no mixed slots, every key once with its index, wave sizes).
+- `RedisCacheOptionsTests` checks the defaults (`AdditionalEndpoints` is null).
+- The Redis commands themselves (`MGET`, `DEL`, `SET EX`, the batches and waves against a server) have no unit tests: the services take a concrete `ConnectionMultiplexer` and `IDatabase`, so they need a real Redis (standalone or cluster) or an abstraction seam first.

@@ -17,6 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Bacon.Caching.Redis\Bacon.Caching.Redis.csproj" />
     <ProjectReference Include="..\Bacon.Caching\Bacon.Caching.csproj" />
   </ItemGroup>
 

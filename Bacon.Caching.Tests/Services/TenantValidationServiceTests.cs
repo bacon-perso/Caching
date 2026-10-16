@@ -1,4 +1,4 @@
-using Bacon.Caching.Services;
+﻿using Bacon.Caching.Services;
 
 namespace Bacon.Caching.Tests.Services;
 

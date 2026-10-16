@@ -1,4 +1,9 @@
 <Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="Directory.Build.props" />
+  </Folder>
+  <Project Path="Bacon.Caching.Redis/Bacon.Caching.Redis.csproj" Id="2138ea74-b64c-4e80-a224-c3bae54397ed" />
+  <Project Path="Bacon.Caching.Redis.Tests/Bacon.Caching.Redis.Tests.csproj" />
   <Project Path="Bacon.Caching.Samples/Bacon.Caching.Samples.csproj" Id="054fc5f6-7bd8-4eeb-bb85-42b90d8f4978" />
   <Project Path="Bacon.Caching.Tests/Bacon.Caching.Tests.csproj" />
   <Project Path="Bacon.Caching/Bacon.Caching.csproj" />

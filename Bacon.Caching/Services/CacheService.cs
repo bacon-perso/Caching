@@ -536,7 +536,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
     {
         if (distributedCacheService == null)
         {
-            throw new InvalidOperationException("Distributed cache not initialized");
+            throw new InvalidOperationException("No distributed cache provider is registered. Either register one or set DistributedCacheDuration to TimeSpan.Zero");
         }
     }
 

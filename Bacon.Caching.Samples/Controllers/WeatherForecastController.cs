@@ -1,4 +1,4 @@
-using Bacon.Caching.Interfaces.Services;
+﻿using Bacon.Caching.Interfaces.Services;
 using Bacon.Caching.Samples.Models;
 using Microsoft.AspNetCore.Mvc;
 

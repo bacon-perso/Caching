@@ -1,5 +1,4 @@
-using Bacon.Caching.Extensions;
-using Bacon.Caching.Interfaces.Models;
+﻿using Bacon.Caching.Extensions;
 using Bacon.Caching.Interfaces.Services;
 using Bacon.Caching.Models;
 using Bacon.Caching.Tests.Models;
@@ -10,19 +9,6 @@ namespace Bacon.Caching.Tests.Extensions;
 [TestFixture]
 internal sealed class CacheExtensionsTests
 {
-    private sealed class OtherDistributedOptions : IDistributedCacheOptions
-    {
-        public string Server { get; set; } = "localhost";
-
-        public string? Password { get; set; }
-    }
-
-    private static void ConfigureRedis(CacheServerOptions options, RedisCacheOptions redisOptions)
-    {
-        options.DistributedCacheType = DistributedCacheTypes.redis;
-        options.DistributedCacheOptions = redisOptions;
-    }
-
     #region AddCache
 
     [Test]
@@ -201,142 +187,6 @@ internal sealed class CacheExtensionsTests
 
         Assert.Throws<ArgumentException>(() =>
             builder.AddItem<TestItem>(o => { o.CacheKey = "key_"; o.DistributedCacheDuration = TimeSpan.FromMinutes(-1); })
-        );
-    }
-
-    #endregion
-
-    #region Redis options
-
-    [Test]
-    public void AddCache_RedisWithoutDistributedCacheOptions_ThrowsArgumentNullException()
-    {
-        ServiceCollection services = new();
-
-        Assert.Throws<ArgumentNullException>(() =>
-            services.AddCache(o => o.DistributedCacheType = DistributedCacheTypes.redis)
-        );
-    }
-
-    [Test]
-    public void AddCache_RedisWithWrongOptionsType_ThrowsArgumentNullException()
-    {
-        ServiceCollection services = new();
-
-        Assert.Throws<ArgumentNullException>(() =>
-            services.AddCache(o =>
-            {
-                o.DistributedCacheType = DistributedCacheTypes.redis;
-                o.DistributedCacheOptions = new OtherDistributedOptions();
-            })
-        );
-    }
-
-    [Test]
-    public void AddCache_RedisServerWhitespace_ThrowsArgumentException()
-    {
-        ServiceCollection services = new();
-
-        Assert.Throws<ArgumentException>(() =>
-            services.AddCache(o => ConfigureRedis(o, new RedisCacheOptions { Server = "  " }))
-        );
-    }
-
-    [Test]
-    public void AddCache_RedisServerContainsPort_ThrowsArgumentException()
-    {
-        ServiceCollection services = new();
-
-        Assert.Throws<ArgumentException>(() =>
-            services.AddCache(o => ConfigureRedis(o, new RedisCacheOptions { Server = "localhost:6379" }))
-        );
-    }
-
-    [Test]
-    public void AddCache_RedisPortZero_ThrowsArgumentException()
-    {
-        ServiceCollection services = new();
-
-        Assert.Throws<ArgumentException>(() =>
-            services.AddCache(o => ConfigureRedis(o, new RedisCacheOptions { Server = "localhost", Port = 0 }))
-        );
-    }
-
-    [Test]
-    public void AddCache_RedisGetBatchSizeZero_ThrowsArgumentOutOfRangeException()
-    {
-        ServiceCollection services = new();
-
-        ArgumentOutOfRangeException? exception = Assert.Throws<ArgumentOutOfRangeException>(() =>
-            services.AddCache(o => ConfigureRedis(o, new RedisCacheOptions { Server = "localhost", Port = 6379, GetBatchSize = 0 }))
-        );
-
-        using (Assert.EnterMultipleScope())
-        {
-            Assert.That(exception!.ParamName, Is.EqualTo(nameof(RedisCacheOptions.GetBatchSize)));
-            Assert.That(exception.Message, Does.Contain(nameof(RedisCacheOptions.GetBatchSize)));
-        };
-    }
-
-    [Test]
-    public void AddCache_RedisGetBatchSizeTooLarge_ThrowsArgumentOutOfRangeException()
-    {
-        ServiceCollection services = new();
-
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            services.AddCache(o => ConfigureRedis(o, new RedisCacheOptions { Server = "localhost", Port = 6379, GetBatchSize = 5001 }))
-        );
-    }
-
-    [Test]
-    public void AddCache_RedisRemoveBatchSizeZero_ThrowsArgumentOutOfRangeException()
-    {
-        ServiceCollection services = new();
-
-        ArgumentOutOfRangeException? exception = Assert.Throws<ArgumentOutOfRangeException>(() =>
-            services.AddCache(o => ConfigureRedis(o, new RedisCacheOptions { Server = "localhost", Port = 6379, RemoveBatchSize = 0 }))
-        );
-
-        using (Assert.EnterMultipleScope())
-        {
-            Assert.That(exception!.ParamName, Is.EqualTo(nameof(RedisCacheOptions.RemoveBatchSize)));
-            Assert.That(exception.Message, Does.Contain(nameof(RedisCacheOptions.RemoveBatchSize)));
-        };
-    }
-
-    [Test]
-    public void AddCache_RedisRemoveBatchSizeTooLarge_ThrowsArgumentOutOfRangeException()
-    {
-        ServiceCollection services = new();
-
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            services.AddCache(o => ConfigureRedis(o, new RedisCacheOptions { Server = "localhost", Port = 6379, RemoveBatchSize = 5001 }))
-        );
-    }
-
-    [Test]
-    public void AddCache_RedisInsertBatchSizeZero_ThrowsArgumentOutOfRangeException()
-    {
-        ServiceCollection services = new();
-
-        ArgumentOutOfRangeException? exception = Assert.Throws<ArgumentOutOfRangeException>(() =>
-            services.AddCache(o => ConfigureRedis(o, new RedisCacheOptions { Server = "localhost", Port = 6379, InsertBatchSize = 0 }))
-        );
-
-        using (Assert.EnterMultipleScope())
-        {
-            Assert.That(exception!.ParamName, Is.EqualTo(nameof(RedisCacheOptions.InsertBatchSize)));
-            Assert.That(exception.Message, Does.Contain(nameof(RedisCacheOptions.InsertBatchSize)));
-        };
-    }
-
-    [Test]
-    public void AddCache_RedisInsertBatchSizeTooLarge_ThrowsArgumentOutOfRangeException()
-    {
-        ServiceCollection services = new();
-
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            services.AddCache(o => ConfigureRedis(o, new RedisCacheOptions { Server = "localhost", Port = 6379, InsertBatchSize = 5001 }))
         );
     }
 

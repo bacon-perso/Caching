@@ -6,13 +6,32 @@ A .NET dual-layer cache library. Items are stored in both in-process memory and 
 
 ```bash
 dotnet add package Bacon.Caching
+dotnet add package Bacon.Caching.Redis   # only if you want Redis as the distributed cache
 ```
+
+`Bacon.Caching` is the core library (memory cache, `ICacheService<T>`, tenants and scopes). The Redis distributed cache is a separate package, `Bacon.Caching.Redis`, that plugs into it.
+
+| Package | Version | Requires |
+|---|---|---|
+| `Bacon.Caching` | 3.0.0 | |
+| `Bacon.Caching.Redis` | 1.0.0 | `Bacon.Caching` 3.0.0 or later |
+
+### Upgrading from Bacon.Caching 2.x
+
+Redis moved out of the core package, which is a breaking change:
+
+- Add the `Bacon.Caching.Redis` package and register Redis with `.AddRedis(...)` after `AddCache(...)`.
+- `CacheServerOptions.DistributedCacheType`, `DistributedCacheOptions`, `HealthCheckOptions` and `LoggerFactory` are gone. Set the Redis options in the `AddRedis` action instead (`Server`, `Port`, `Password`, `UseSsl`, `HealthCheckOptions`, `LoggerFactory`, …).
+- `RedisCacheOptions` is now in the `Bacon.Caching.Redis.Models` namespace.
+- A new `RedisCacheOptions.ServerType` (`Standalone` by default) declares whether you connect to a standalone server or to a Redis Cluster.
 
 ## Setup
 
 ### Memory-only
 
 ```csharp
+using Bacon.Caching.Extensions;
+
 builder.Services.AddCache(o =>
 {
     o.TenantId = "my-app";
@@ -27,17 +46,23 @@ builder.Services.AddCache(o =>
 ### Memory + Redis
 
 ```csharp
+using Bacon.Caching.Extensions;
+using Bacon.Caching.Redis.Extensions;
+using Bacon.Caching.Redis.Models;
+
 builder.Services.AddCache(o =>
 {
-    o.TenantId              = "my-app";
-    o.DistributedCacheType  = DistributedCacheTypes.redis;
-    o.DistributedCacheOptions = new RedisCacheOptions
-    {
-        Server   = "redis-host",
-        Port     = 6379,
-        Password = "secret",
-        UseSsl   = false,
-    };
+    o.TenantId = "my-app";
+})
+.AddRedis(o =>
+{
+    o.Server     = "redis-host";
+    o.Port       = 6379;
+    o.Password   = "secret";
+    o.UseSsl     = false;
+    o.ServerType = RedisServerTypes.Standalone;   // RedisServerTypes.Cluster for a Redis Cluster
+    // o.LoggerFactory      = loggerFactory;      // optional: logs the Redis connection events
+    // o.HealthCheckOptions = new();              // optional: registers a health check
 })
 .AddItem<WeatherForecast>(o =>
 {
@@ -51,9 +76,42 @@ Call `.AddItem<T>()` once per type you want to cache. Each type gets its own key
 
 The `Bacon.Caching.Samples` project shows a complete registration: `Program.cs` reads the Redis settings from the `CacheSettings:RedisSettings` configuration section, passes a logger factory for connection events, and registers a `WeatherForecast` type.
 
-The Redis connection is created when `AddCache` runs. If Redis is unreachable at startup the application still starts: the failure is logged (when a `LoggerFactory` is configured) and the Redis client keeps retrying in the background, which can make startup slightly longer.
+Without `AddRedis` only the memory cache is used. A type with a `DistributedCacheDuration` but no distributed cache registered keeps working with the memory cache, and the missing distributed cache is logged.
 
-Registration validates its input and throws on invalid values: a null `configureOptions` (`ArgumentNullException`), an invalid tenant ID, a missing or wrongly typed `DistributedCacheOptions`, a server containing a port, port `0`, batch sizes outside 1 – 5 000, an empty `CacheKey` or one longer than 50 characters, a type registered twice, an undefined `Scope`, and negative durations (`ArgumentException` / `ArgumentOutOfRangeException`).
+The Redis connection is created when `AddRedis` runs. If Redis is unreachable at startup the application still starts: the failure is logged (when a `LoggerFactory` is configured in the Redis options) and the Redis client keeps retrying in the background, which can make startup slightly longer.
+
+Registration validates its input and throws on invalid values: a null `configureOptions` (`ArgumentNullException`), an invalid tenant ID, an empty server, a server containing a port, port `0`, an undefined `ServerType`, batch sizes outside 1 – 5 000, an empty `CacheKey` or one longer than 50 characters, a type registered twice, an undefined `Scope`, and negative durations (`ArgumentException` / `ArgumentOutOfRangeException`). Registering a second distributed cache throws an `InvalidOperationException`: only one is supported.
+
+### Redis Cluster
+
+Set `ServerType = RedisServerTypes.Cluster` when you connect to a Redis Cluster; keep the default `Standalone` for a single server or a primary/replica pair. The library does not detect it for you.
+
+```csharp
+.AddRedis(o =>
+{
+    o.Server     = "redis-cluster-node-1";   // a seed node used to discover the cluster
+    o.Port       = 6379;
+    o.ServerType = RedisServerTypes.Cluster;
+})
+```
+
+- **Why it matters.** A Redis Cluster only accepts a command with several keys when all of them are in the same hash slot. Cache keys that differ by suffix usually are not, so with `Cluster` the library groups the keys by slot and sends the resulting small commands together (pipelined) in waves, instead of one `MGET` / `DEL` for the whole batch. At most twice the batch size (`GetBatchSize` / `RemoveBatchSize`) in keys are in flight at a time, as with a standalone server.
+- **A wrong setting.** `Cluster` on a standalone server works but adds a small overhead when several items are read or removed. `Standalone` on a cluster makes reading or removing several items fail: the errors are logged and the results are missing. When a `LoggerFactory` is configured and a server is connected at startup, a mismatch is logged as a warning, in both directions.
+- **Connection.** `Server` and `Port` are used as the seed node to discover the cluster. Add more seed nodes with `AdditionalEndpoints` so the connection can start even when the main server is down; the other nodes are discovered from any reachable seed. An endpoint without a `Port` uses the main `Port`. Additional endpoints are only allowed with `ServerType = RedisServerTypes.Cluster`.
+
+```csharp
+.AddRedis(o =>
+{
+    o.Server              = "redis-cluster-node-1";
+    o.Port                = 6379;
+    o.ServerType          = RedisServerTypes.Cluster;
+    o.AdditionalEndpoints =
+    [
+        new RedisEndpoint { Server = "redis-cluster-node-2" },                 // uses the main Port
+        new RedisEndpoint { Server = "redis-cluster-node-3", Port = 6380 }
+    ];
+})
+```
 
 ## Usage
 
@@ -129,7 +187,7 @@ await weatherForecastCacheService.RemoveItemsAsync([1, 2, 3], cancellationToken:
 
 Duplicate suffixes are ignored. The collections cannot be null; an empty collection does nothing (`GetItemsAsync` returns an empty dictionary). Suffixes cannot be null or blank, and `SetItemsAsync` values cannot be null.
 
-In Redis these operations are executed in batches (`GetBatchSize`, `InsertBatchSize`, `RemoveBatchSize`, up to two batches concurrently) so very large collections do not block the server.
+In Redis these operations are executed in batches (`GetBatchSize`, `InsertBatchSize`, `RemoveBatchSize`, up to two batches in flight at a time) so very large collections do not block the server. See "Redis Cluster" for how this works with a cluster.
 
 ### Multi-tenancy
 
@@ -145,6 +203,8 @@ WeatherForecast? result = await weatherForecastCacheService.GetAsync(dayIndex, t
 Some data is not tenant specific, such as the tenant list itself or system information. Set `Scope = CacheScopes.Global` on the type to share its items between all tenants:
 
 ```csharp
+using Bacon.Caching.Models;
+
 builder.Services.AddCache(o => { /* ... */ })
 .AddItem<SystemInformation>(o =>
 {
@@ -221,10 +281,6 @@ Items are always removed by explicit key through `RemoveAsync` (no suffix), `Rem
 | Property | Description |
 |---|---|
 | `TenantId` | Default tenant ID, used when no tenant is passed to a call. 1 – 50 characters of `A-Z a-z 0-9 . _ - :`. Required unless every call passes one. Not used by `Global` types. |
-| `DistributedCacheType` | `none` (default) or `redis`. |
-| `DistributedCacheOptions` | `RedisCacheOptions` instance. Required when `DistributedCacheType` is `redis`. |
-| `HealthCheckOptions` | Optional (`null` by default). Registers an ASP.NET Core health check for the Redis connection. |
-| `LoggerFactory` | Optional. Passed to the StackExchange.Redis multiplexer for connection-event logging. |
 
 ### `CacheOptions<T>`
 
@@ -235,7 +291,7 @@ Items are always removed by explicit key through `RemoveAsync` (no suffix), `Rem
 | `DistributedCacheDuration` | TTL in Redis. `TimeSpan.Zero` (default) disables distributed caching. Cannot be negative. |
 | `Scope` | `CacheScopes.Tenant` (default): items are isolated per tenant. `CacheScopes.Global`: items are shared by all tenants and no tenant ID is used. Must be a defined value. |
 
-### `RedisCacheOptions`
+### `RedisCacheOptions` (`Bacon.Caching.Redis`)
 
 | Property | Default | Description |
 |---|---|---|
@@ -243,12 +299,18 @@ Items are always removed by explicit key through `RemoveAsync` (no suffix), `Rem
 | `Port` | `6379` | Redis port. Cannot be 0. |
 | `Password` | `null` | Redis password. |
 | `UseSsl` | `false` | Enable TLS. |
-| `GetBatchSize` | `100` | Max keys per read command when getting several items (1 – 5 000). |
-| `InsertBatchSize` | `100` | Max items per batch when setting several items (1 – 5 000). |
-| `RemoveBatchSize` | `100` | Max keys per delete command when removing several items (1 – 5 000). |
+| `ServerType` | `Standalone` | `Standalone` for a single server or a primary/replica pair, `Cluster` for a Redis Cluster. See "Redis Cluster". |
+| `AdditionalEndpoints` | `null` | Extra seed nodes (`RedisEndpoint`: `Server` without port, optional `Port` that defaults to the main `Port`). Only with `ServerType = Cluster`. See "Redis Cluster". |
+| `GetBatchSize` | `100` | Max keys per read command when getting several items (1 – 5 000). With `Cluster` a command only holds keys of the same hash slot, so it can hold fewer. At most twice this number of keys are in flight at a time. |
+| `InsertBatchSize` | `100` | Max items per batch when setting several items (1 – 5 000). Each item is written with its own command; at most twice this number of items are in flight at a time. |
+| `RemoveBatchSize` | `100` | Max keys per delete command when removing several items (1 – 5 000). With `Cluster` a command only holds keys of the same hash slot, so it can hold fewer. At most twice this number of keys are in flight at a time. |
 | `SyncTimeout` | `5000` | Redis operation timeout in ms, applied to both synchronous and asynchronous operations. It is also the longest a call can be delayed while Redis is down. |
+| `LoggerFactory` | `null` | Optional. Passed to the StackExchange.Redis multiplexer for connection-event logging, and used to log a `ServerType` mismatch at startup. |
+| `HealthCheckOptions` | `null` | Optional. Registers an ASP.NET Core health check for the Redis connection. |
 
-### `DistributedHealthCheckOptions`
+### `DistributedHealthCheckOptions` (`HealthCheckOptions` of the Redis options)
+
+The values left unset get the Redis defaults:
 
 | Property | Default | Description |
 |---|---|---|
