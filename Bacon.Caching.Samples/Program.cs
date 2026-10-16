@@ -46,6 +46,7 @@ webApplicationBuilder.Services.AddCache(o =>
         o.CacheKey = "weather_";
         o.MemoryCacheDuration = TimeSpan.FromSeconds(60);
         o.DistributedCacheDuration = TimeSpan.FromSeconds(60);
+        o.Scope = CacheScopes.Tenant;
     });
 
 WebApplication webApplication = webApplicationBuilder.Build();

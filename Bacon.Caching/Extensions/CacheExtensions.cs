@@ -27,7 +27,7 @@ public static class CacheExtensions
     /// When a distributed cache is configured, the connection is created during the registration. If it is unreachable the application still starts, but the connection retries can make the startup slightly longer.
     /// </remarks>
     /// <exception cref="ArgumentNullException">The configure options action is null.</exception>
-    /// <exception cref="ArgumentException">The global tenant ID is invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
+    /// <exception cref="ArgumentException">The default tenant ID is invalid (1 to 50 characters of A-Z, a-z, 0-9, '.', '_', '-' or ':').</exception>
     /// <exception cref="ArgumentNullException">A distributed cache type is selected but the distributed cache options are missing or are not of the expected type (RedisCacheOptions for redis).</exception>
     /// <exception cref="ArgumentException">The server is empty or whitespace, or it contains a port number.</exception>
     /// <exception cref="ArgumentException">The port number is 0.</exception>
@@ -72,6 +72,7 @@ public static class CacheExtensions
     /// <exception cref="ArgumentException">The cache key is longer than 50 characters.</exception>
     /// <exception cref="ArgumentException">The memory cache duration is negative.</exception>
     /// <exception cref="ArgumentException">The distributed cache duration is negative.</exception>
+    /// <exception cref="ArgumentException">The scope is not a defined <see cref="CacheScopes"/> value.</exception>
     public static CacheBuilder AddItem<TItem>(this CacheBuilder cacheBuilder, Action<CacheOptions<TItem>> configureOptions)
     {
         ArgumentNullException.ThrowIfNull(cacheBuilder, nameof(cacheBuilder));
@@ -187,6 +188,11 @@ public static class CacheExtensions
         if (cacheOptions.DistributedCacheDuration.Ticks < 0)
         {
             throw new ArgumentException($"Caching - The {nameof(cacheOptions.DistributedCacheDuration)} cannot contain negative values.");
+        }
+
+        if (!Enum.IsDefined(cacheOptions.Scope))
+        {
+            throw new ArgumentException($"Caching - The {nameof(cacheOptions.Scope)} of '{type.Name}' is not a valid value ({cacheOptions.Scope}).");
         }
     }
 

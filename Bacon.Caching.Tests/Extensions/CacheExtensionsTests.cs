@@ -161,6 +161,28 @@ internal sealed class CacheExtensionsTests
     }
 
     [Test]
+    public void AddItem_UndefinedScope_ThrowsArgumentException()
+    {
+        ServiceCollection services = new();
+        CacheBuilder builder = services.AddCache(o => o.TenantId = "tenant");
+
+        Assert.Throws<ArgumentException>(() =>
+            builder.AddItem<TestItem>(o => { o.CacheKey = "key_"; o.Scope = (CacheScopes)99; })
+        );
+    }
+
+    [Test]
+    public void AddItem_GlobalScope_DoesNotThrow()
+    {
+        ServiceCollection services = new();
+        CacheBuilder builder = services.AddCache(o => { });
+
+        Assert.DoesNotThrow(() =>
+            builder.AddItem<TestItem>(o => { o.CacheKey = "key_"; o.Scope = CacheScopes.Global; })
+        );
+    }
+
+    [Test]
     public void AddItem_NegativeMemoryCacheDuration_ThrowsArgumentException()
     {
         ServiceCollection services = new();

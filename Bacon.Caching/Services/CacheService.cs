@@ -42,7 +42,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
             return defaultValue;
         }
 
-        string cacheKey = GetCacheKey(tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
+        string cacheKey = GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
 
         TItem? obj = defaultValue;
 
@@ -117,7 +117,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
         Dictionary<string, TSuffix> relations = [];
         foreach (TSuffix cacheKeySuffix in typedSuffixes)
         {
-            string key = GetCacheKey(tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
+            string key = GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
 
             items.Add(key, defaultValue);
             relations.Add(key, cacheKeySuffix);
@@ -167,16 +167,23 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
                 {
                     bool isMemoryCacheEnabled = IsMemoryCacheEnabled(source, isWrite: true);
 
+                    MemoryCacheEntryOptions? memoryCacheEntryOptions = null;
                     if (isMemoryCacheEnabled)
                     {
                         LogSyncMemoryCacheFromDistributedCacheDebug(source);
+
+                        memoryCacheEntryOptions ??= new()
+                        {
+                            SlidingExpiration = null,
+                            AbsoluteExpirationRelativeToNow = _cacheOptions.MemoryCacheDuration
+                        };
                     }
 
                     foreach (KeyValuePair<string, TItem?> distributedCacheValue in distributedCacheValues)
                     {
                         if (isMemoryCacheEnabled && distributedCacheValue.Value is not null)
                         {
-                            SetMemoryCache(distributedCacheValue.Key, distributedCacheValue.Value, _cacheOptions.MemoryCacheDuration);
+                            SetMemoryCache(distributedCacheValue.Key, distributedCacheValue.Value, _cacheOptions.MemoryCacheDuration, memoryCacheEntryOptions: memoryCacheEntryOptions);
                         }
 
                         items[distributedCacheValue.Key] = distributedCacheValue.Value;
@@ -216,7 +223,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
             return;
         }
 
-        string cacheKey = GetCacheKey(tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
+        string cacheKey = GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
 
         if (IsDistributedCacheEnabled(source))
         {
@@ -269,13 +276,19 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
         ValidateCacheKeySuffixes(typedSuffixes, nameof(items));
         ValidateNullValues(items);
 
+        Dictionary<string, TItem> keyedItems = new(items.Count);
+        foreach (KeyValuePair<TSuffix, TItem> item in items)
+        {
+            keyedItems.Add(GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, item.Key), item.Value);
+        }
+
         if (IsDistributedCacheEnabled(source))
         {
             try
             {
                 ValidateDistributedCache();
 
-                await SetDistributedCacheAsync(tenantId, _cacheOptions.CacheKey, items, _cacheOptions.DistributedCacheDuration, cancellationToken);
+                await distributedCacheService!.SetItemsAsync(keyedItems, _cacheOptions.DistributedCacheDuration, cancellationToken: cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -287,9 +300,15 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
         {
             try
             {
-                foreach (KeyValuePair<TSuffix, TItem> item in items)
+                MemoryCacheEntryOptions memoryCacheEntryOptions = new()
                 {
-                    SetMemoryCache(GetCacheKey(tenantId, _cacheOptions.CacheKey, item.Key), item.Value, _cacheOptions.MemoryCacheDuration);
+                    SlidingExpiration = null,
+                    AbsoluteExpirationRelativeToNow = _cacheOptions.MemoryCacheDuration
+                };
+
+                foreach (KeyValuePair<string, TItem> item in keyedItems)
+                {
+                    SetMemoryCache(item.Key, item.Value, _cacheOptions.MemoryCacheDuration, memoryCacheEntryOptions: memoryCacheEntryOptions);
                 }
             }
             catch (Exception ex)
@@ -322,7 +341,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
             return;
         }
 
-        string cacheKey = GetCacheKey(tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
+        string cacheKey = GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
 
         if (IsDistributedCacheEnabled(source))
         {
@@ -374,7 +393,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
         ValidateCacheKeySuffixes(typedSuffixes, nameof(cacheKeySuffixes));
 
-        string[] cacheKeys = [.. typedSuffixes.Select(s => GetCacheKey(tenantId, _cacheOptions.CacheKey, s))];
+        string[] cacheKeys = [.. typedSuffixes.Select(s => GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, s))];
 
         if (IsDistributedCacheEnabled(source))
         {
@@ -414,8 +433,20 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
     #region Global
 
-    private string GetCacheKey<TSuffix>(string? tenantId, string cacheKey, TSuffix? cacheKeySuffix)
+    private string GetCacheKey<TSuffix>(CacheScopes cacheScope, string? tenantId, string cacheKey, TSuffix? cacheKeySuffix)
     {
+        string suffix = cacheKeySuffix?.ToString() ?? string.Empty;
+
+        if (cacheScope == CacheScopes.Global)
+        {
+            if (tenantId is not null)
+            {
+                throw new ArgumentException("Caching - A global cache item cannot be accessed with a tenant ID", nameof(tenantId));
+            }
+
+            return $"|{cacheKey}{suffix}";
+        }
+
         if (tenantId is not null)
         {
             TenantValidationService.ValidateTenantId(tenantId);
@@ -425,7 +456,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
         ArgumentException.ThrowIfNullOrWhiteSpace(_tenantId, nameof(tenantId));
 
-        return $"{_tenantId}_{cacheKey}{(cacheKeySuffix?.ToString() ?? string.Empty)}";
+        return $"{_tenantId}_{cacheKey}{suffix}";
     }
 
     private static Dictionary<TSuffix, TItem?> MapCachedItems<TSuffix>(IDictionary<string, TItem?> items, Dictionary<string, TSuffix> relations) where TSuffix : notnull
@@ -525,26 +556,15 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
     #region Set
 
-    private void SetMemoryCache(string key, TItem item, TimeSpan duration)
+    private void SetMemoryCache(string key, TItem item, TimeSpan duration, MemoryCacheEntryOptions? memoryCacheEntryOptions = null)
     {
-        MemoryCacheEntryOptions memoryCacheEntryOptions = new()
+        memoryCacheEntryOptions ??= new()
         {
             SlidingExpiration = null,
             AbsoluteExpirationRelativeToNow = duration
         };
 
         memoryCache.Set(key, item, memoryCacheEntryOptions);
-    }
-
-    private async Task SetDistributedCacheAsync<TSuffix>(string? tenantId, string cacheKey, IDictionary<TSuffix, TItem> items, TimeSpan duration, CancellationToken cancellationToken) where TSuffix : notnull
-    {
-        Dictionary<string, TItem> dic = [];
-        foreach (KeyValuePair<TSuffix, TItem> item in items)
-        {
-            dic.Add(GetCacheKey(tenantId, cacheKey, item.Key), item.Value);
-        }
-
-        await distributedCacheService!.SetItemsAsync(dic, duration, cancellationToken: cancellationToken);
     }
 
     #endregion Set

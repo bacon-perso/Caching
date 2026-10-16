@@ -53,7 +53,7 @@ The `Bacon.Caching.Samples` project shows a complete registration: `Program.cs` 
 
 The Redis connection is created when `AddCache` runs. If Redis is unreachable at startup the application still starts: the failure is logged (when a `LoggerFactory` is configured) and the Redis client keeps retrying in the background, which can make startup slightly longer.
 
-Registration validates its input and throws on invalid values: a null `configureOptions` (`ArgumentNullException`), an invalid tenant ID, a missing or wrongly typed `DistributedCacheOptions`, a server containing a port, port `0`, batch sizes outside 1 – 5 000, an empty `CacheKey` or one longer than 50 characters, a type registered twice, and negative durations (`ArgumentException` / `ArgumentOutOfRangeException`).
+Registration validates its input and throws on invalid values: a null `configureOptions` (`ArgumentNullException`), an invalid tenant ID, a missing or wrongly typed `DistributedCacheOptions`, a server containing a port, port `0`, batch sizes outside 1 – 5 000, an empty `CacheKey` or one longer than 50 characters, a type registered twice, an undefined `Scope`, and negative durations (`ArgumentException` / `ArgumentOutOfRangeException`).
 
 ## Usage
 
@@ -133,22 +133,47 @@ In Redis these operations are executed in batches (`GetBatchSize`, `InsertBatchS
 
 ### Multi-tenancy
 
-`TenantId` can be set globally in `AddCache` or overridden on each call. A tenant ID is 1 to 50 characters of `A-Z a-z 0-9 . _ - :`. If no global tenant is set, every call must pass one.
+`TenantId` can be set once in `AddCache` (the default tenant) or overridden on each call. A tenant ID is 1 to 50 characters of `A-Z a-z 0-9 . _ - :`. If no default tenant is set, every call must pass one.
 
 ```csharp
 await weatherForecastCacheService.SetAsync(forecast, dayIndex, tenantId: "tenant-abc");
 WeatherForecast? result = await weatherForecastCacheService.GetAsync(dayIndex, tenantId: "tenant-abc");
 ```
 
+### Global items (shared by all tenants)
+
+Some data is not tenant specific, such as the tenant list itself or system information. Set `Scope = CacheScopes.Global` on the type to share its items between all tenants:
+
+```csharp
+builder.Services.AddCache(o => { /* ... */ })
+.AddItem<SystemInformation>(o =>
+{
+    o.CacheKey                 = "system_info_";
+    o.Scope                    = CacheScopes.Global;
+    o.MemoryCacheDuration      = TimeSpan.FromMinutes(5);
+    o.DistributedCacheDuration = TimeSpan.FromMinutes(30);
+});
+```
+
+| Scope | Cache key | Tenant ID |
+|---|---|---|
+| `Tenant` (default) | `{tenantId}_{CacheKey}{suffix}` | Required, per call or from `CacheServerOptions.TenantId` |
+| `Global` | `\|{CacheKey}{suffix}` | Not used: do not pass one |
+
+- A global type never needs a tenant, so `CacheServerOptions.TenantId` can be left unset. Passing a `tenantId` to a global type throws an `ArgumentException`, since it would be a mistake rather than something to ignore.
+- The leading `|` cannot appear in a tenant key (tenant IDs do not allow it), so a global key can never collide with a tenant key. It also makes global keys easy to spot when browsing Redis.
+- Removing or overwriting a global item affects every tenant.
+- A type has a single scope. A type can only be registered once, so if the same class must be both global and per tenant, register a separate type for each use.
+
 ### Passing a tenant ID without a suffix
 
 `tenantId` and a string suffix are both strings, so a positional string argument is **always treated as the suffix**. To pass only a tenant ID, name the argument:
 
 ```csharp
-await cache.GetAsync("abc");                  // suffix "abc",         global tenant
+await cache.GetAsync("abc");                  // suffix "abc",         default tenant
 await cache.GetAsync(tenantId: "abc");        // no suffix,           tenant "abc"
 await cache.GetAsync("abc", "tenant-abc");    // suffix "abc",         tenant "tenant-abc"
-await cache.GetAsync();                       // no suffix,           global tenant
+await cache.GetAsync();                       // no suffix,           default tenant
 
 await cache.SetAsync(item, tenantId: "abc");  // same rule for SetAsync and RemoveAsync
 ```
@@ -184,8 +209,9 @@ Items are always removed by explicit key through `RemoveAsync` (no suffix), `Rem
 |---|---|
 | Null suffix, null item, null collection, null value in `SetItemsAsync` | `ArgumentNullException` |
 | Null or blank suffix inside a collection | `ArgumentException` |
-| No tenant ID passed and no global tenant configured | `ArgumentNullException` |
+| No tenant ID passed and no default tenant configured (tenant types) | `ArgumentNullException` |
 | Empty or invalid tenant ID | `ArgumentException` |
+| Tenant ID passed to a `Global` type | `ArgumentException` |
 | Canceled `CancellationToken` | `OperationCanceledException` |
 
 ## Configuration reference
@@ -194,7 +220,7 @@ Items are always removed by explicit key through `RemoveAsync` (no suffix), `Rem
 
 | Property | Description |
 |---|---|
-| `TenantId` | Global tenant ID, used when no tenant is passed to a call. 1 – 50 characters of `A-Z a-z 0-9 . _ - :`. Required unless every call passes one. |
+| `TenantId` | Default tenant ID, used when no tenant is passed to a call. 1 – 50 characters of `A-Z a-z 0-9 . _ - :`. Required unless every call passes one. Not used by `Global` types. |
 | `DistributedCacheType` | `none` (default) or `redis`. |
 | `DistributedCacheOptions` | `RedisCacheOptions` instance. Required when `DistributedCacheType` is `redis`. |
 | `HealthCheckOptions` | Optional (`null` by default). Registers an ASP.NET Core health check for the Redis connection. |
@@ -207,6 +233,7 @@ Items are always removed by explicit key through `RemoveAsync` (no suffix), `Rem
 | `CacheKey` | Key prefix for this type (e.g. `"weather_"`). Required, cannot be empty or whitespace, maximum 50 characters. |
 | `MemoryCacheDuration` | TTL for in-process memory. `TimeSpan.Zero` (default) disables memory caching. Cannot be negative. |
 | `DistributedCacheDuration` | TTL in Redis. `TimeSpan.Zero` (default) disables distributed caching. Cannot be negative. |
+| `Scope` | `CacheScopes.Tenant` (default): items are isolated per tenant. `CacheScopes.Global`: items are shared by all tenants and no tenant ID is used. Must be a defined value. |
 
 ### `RedisCacheOptions`
 

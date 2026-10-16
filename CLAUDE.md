@@ -21,7 +21,7 @@ dotnet run --project Bacon.Caching.Samples
 
 ## Code style
 
-Always use braces (even for single statements) and explicit types instead of `var`. Files use CRLF line endings in the working tree (`core.autocrlf=true`), except the test files, `CLAUDE.md` and files created by tools, which are LF; keep a file's existing line endings.
+Always use braces (even for single statements) and explicit types instead of `var`. Files use CRLF line endings in the working tree (`core.autocrlf=true`), except files created by tools, which are LF; keep a file's existing line endings. Files end at their last closing brace, with no trailing newline or empty line.
 
 ## Architecture
 
@@ -44,12 +44,12 @@ services.AddCache(o => {
 });
 ```
 
-`AddItem<T>` registers `CacheOptions<T>` via `IOptions<CacheOptions<T>>`, so each `ICacheService<T>` gets its own strongly-typed options. Setting either duration to `TimeSpan.Zero` disables that layer for that type.
+`AddItem<T>` registers `CacheOptions<T>` via `IOptions<CacheOptions<T>>`, so each `ICacheService<T>` gets its own strongly-typed options. Setting either duration to `TimeSpan.Zero` disables that layer for that type. `Scope` (`CacheScopes.Tenant` by default) can be set to `CacheScopes.Global` for data shared by all tenants (tenant data, system information): see "Cache key format".
 
 Both methods take a `configureOptions` action and throw `ArgumentNullException` for a null argument. Options are validated at registration (`CacheExtensions`):
 
 - Tenant ID (if set): 1-50 characters of `A-Z a-z 0-9 . _ - :`.
-- `CacheKey`: not empty/whitespace, at most 50 characters. A type can only be configured once. Durations cannot be negative.
+- `CacheKey`: not empty/whitespace, at most 50 characters. A type can only be configured once. Durations cannot be negative. `Scope` must be a defined `CacheScopes` value.
 - Redis: server without a port, port not 0, `GetBatchSize` / `InsertBatchSize` / `RemoveBatchSize` between 1 and 5000 (default 100).
 
 `AddCache` creates the Redis connection during registration (`AbortOnConnectFail = false`).
@@ -70,23 +70,23 @@ ICacheService<T>  (public, open-generic singleton)
 
 `ICacheService<T>` is `ValueTask`-based with three families, each with a no-suffix and a suffix form: `GetAsync` / `GetAsync<TSuffix>` / `GetItemsAsync`, `SetAsync` / `SetAsync<TSuffix>` / `SetItemsAsync`, `RemoveAsync` / `RemoveAsync<TSuffix>` / `RemoveItemsAsync`. There are no layer-specific (memory-only / distributed-only) methods.
 
-- The no-suffix form targets a single item stored at `{tenantId}_{CacheKey}` (for example a configuration object).
-- `tenantId` is optional on every method (falls back to `CacheServerOptions.TenantId`); `cancellationToken` is last.
+- The no-suffix form targets a single item stored at `{tenantId}_{CacheKey}` (`|{CacheKey}` for global types), for example a configuration object.
+- `tenantId` is optional on every method (falls back to `CacheServerOptions.TenantId`); `cancellationToken` is last. For `CacheScopes.Global` types it must be null: passing one throws `ArgumentException`.
 - **Overload resolution:** `GetAsync(string? tenantId)` and `GetAsync<TSuffix>(TSuffix suffix, string? tenantId)` are ambiguous for a string argument. The suffix overloads are marked `[OverloadResolutionPriority(1)]`, so a positional string is a *suffix*; pass the tenant by name (`GetAsync(tenantId: "abc")`). The attribute is not inherited, so it must be repeated on both `ICacheService<T>` and `CacheService<T>` (and only matters for calls through the concrete type when forgotten, where `sut.GetAsync("x")` becomes ambiguous).
 - The suffix is converted with `ToString()`, so it must be deterministic. Null suffixes/items throw `ArgumentNullException`. Plural methods de-duplicate suffixes, return immediately for empty collections (nothing is read, written or removed; `GetItemsAsync` returns an empty dictionary) and reject null/blank suffixes (`ArgumentException`).
 - `IDistributedCacheService<T>` (internal, `Task`-based, string keys) mirrors this with `GetAsync`, `GetItemsAsync`, `SetAsync`, `SetItemsAsync`, `RemoveAsync`, `RemoveItemsAsync`.
 
 ### Layer ordering and error handling
 
-Reads check memory, then distributed, and backfill memory on a distributed hit (also when only the distributed layer returns values: memory disabled means the values are returned without being written to memory). Writes and removals do the distributed layer first, then memory, each in its **own** `try/catch`, so a Redis failure never skips the memory operation (a failed removal must not leave stale memory entries). `ValidateDistributedCache()` ("Distributed cache not initialized") runs inside the distributed `try`, so a missing service is logged, not thrown.
+Reads check memory, then distributed, and backfill memory on a distributed hit (also when only the distributed layer returns values: memory disabled means the values are returned without being written to memory). Writes and removals do the distributed layer first, then memory, each in its **own** `try/catch`, so a Redis failure never skips the memory operation (a failed removal must not leave stale memory entries). `ValidateDistributedCache()` ("Distributed cache not initialized") runs inside the distributed `try`, so a missing service is logged, not thrown. Cache keys are built **before** either `try` (`SetItemsAsync` builds one key/item dictionary shared by both layers), so argument errors are thrown instead of logged: an invalid or missing tenant ID, a tenant ID passed to a global type, or two suffixes with the same string representation.
 
 Redis outage behavior: at startup the failure is logged (if a `LoggerFactory` is configured) and the client's retries can slow startup slightly. At runtime a read that misses memory still has to reach Redis: at best `RedisCacheService.ValidateIsConnected` fails it instantly, at worst (outage not yet detected) it waits for the Redis timeout (`RedisCacheOptions.SyncTimeout`, applied to sync and async operations) before failing, being logged and returning null. The cost of an outage is latency, not exceptions.
 
 ### Cache key format
 
-`{tenantId}_{CacheKey}{suffix}`
+`{tenantId}_{CacheKey}{suffix}` for `CacheScopes.Tenant` (the default), `|{CacheKey}{suffix}` for `CacheScopes.Global`.
 
-`tenantId` resolves from the per-call override → `CacheServerOptions.TenantId`. It is required: null throws `ArgumentNullException`, empty or an invalid format throws `ArgumentException`.
+`tenantId` resolves from the per-call override → `CacheServerOptions.TenantId`. It is required: null throws `ArgumentNullException`, empty or an invalid format throws `ArgumentException`. Global types never use a tenant (neither the per-call value nor `CacheServerOptions.TenantId`, which can be unset). The leading `|` cannot occur in a tenant key (tenant IDs only allow `A-Z a-z 0-9 . _ - :`), so global and tenant keys never collide; the only protection between two types sharing a `CacheKey` remains the naming of `CacheKey`.
 
 ### Serialization pipeline (`CacheSerializerService`)
 
@@ -114,6 +114,6 @@ There is intentionally no prefix/"flush all" operation (it was removed along wit
 
 `Bacon.Caching.Tests` uses NUnit 4 (`Assert.ThrowsAsync` must be awaited; `ValueTask` results need `.AsTask()` for it).
 
-- `CacheServiceTests` runs `CacheService<T>` against a real `MemoryCache` and `Fakes/FakeDistributedCacheService<T>`. The fake exposes `Seed`, `Clear`, `Contains`, `RequestedKeys` (keys asked of `GetItemsAsync`) and `FailWith` (makes every operation throw, to test graceful degradation). Tests call the concrete class positionally and through `ICacheService<T>` to cover the overload-resolution rule above. The three modes are covered separately (memory only, distributed only, mixed), plus both layers disabled; the "Synchronous completion" tests assert `IsCompletedSuccessfully` on the returned `ValueTask` before awaiting it, which protects the allocation-free memory-only/memory-hit path.
+- `CacheServiceTests` runs `CacheService<T>` against a real `MemoryCache` and `Fakes/FakeDistributedCacheService<T>`. The fake exposes `Seed`, `Clear`, `Contains`, `RequestedKeys` (keys asked of `GetItemsAsync`) and `FailWith` (makes every operation throw, to test graceful degradation). Tests call the concrete class positionally and through `ICacheService<T>` to cover the overload-resolution rule above. The three modes are covered separately (memory only, distributed only, mixed), plus both layers disabled and the global scope (key shape, no tenant required, no collision with tenant keys, tenant ID rejected); the "Synchronous completion" tests assert `IsCompletedSuccessfully` on the returned `ValueTask` before awaiting it, which protects the allocation-free memory-only/memory-hit path.
 - `CacheExtensionsTests` covers registration validation. It must not use valid Redis options (that would try to connect).
 - `RedisCacheService` (batching, `SET EX`) has no unit tests: it takes a concrete `ConnectionMultiplexer` and `IDatabase`, so it needs a real Redis or an abstraction seam first.

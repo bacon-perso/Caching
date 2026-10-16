@@ -28,7 +28,7 @@ internal sealed class CacheServiceTests
     [TearDown]
     public void TearDown() => _memoryCache.Dispose();
 
-    private CacheService<TestItem> CreateService(string? tenantId = TenantId, TimeSpan? memDuration = null, TimeSpan? distDuration = null, bool includeDistributedCache = true)
+    private CacheService<TestItem> CreateService(string? tenantId = TenantId, TimeSpan? memDuration = null, TimeSpan? distDuration = null, bool includeDistributedCache = true, CacheScopes scope = CacheScopes.Tenant)
     {
         IOptions<CacheServerOptions> serverOptions = Options.Create(new CacheServerOptions { TenantId = tenantId });
         IOptions<CacheOptions<TestItem>> cacheOptions = Options.Create(new CacheOptions<TestItem>
@@ -36,12 +36,20 @@ internal sealed class CacheServiceTests
             CacheKey = CacheKey,
             MemoryCacheDuration = memDuration ?? TimeSpan.FromMinutes(5),
             DistributedCacheDuration = distDuration ?? TimeSpan.FromMinutes(10),
+            Scope = scope,
         });
 
         return new CacheService<TestItem>(serverOptions, cacheOptions, _memoryCache, NullLogger<TestItem>.Instance, includeDistributedCache ? _fakeDistCache : null);
     }
 
     private static string Key(string suffix = "", string tenantId = TenantId) => $"{tenantId}_{CacheKey}{suffix}";
+
+    private static string GlobalKey(string suffix = "") => $"|{CacheKey}{suffix}";
+
+    private sealed class FixedSuffix(string value)
+    {
+        public override string ToString() => value;
+    }
 
     private CacheService<TestItem> CreateMemoryOnlyService() => CreateService(distDuration: TimeSpan.Zero, includeDistributedCache: false);
 
@@ -606,7 +614,7 @@ internal sealed class CacheServiceTests
         {
             Assert.That((await sut.GetAsync("key1", tenantId: "tenant-a"))!.Name, Is.EqualTo("Alice"));
             Assert.That((await sut.GetAsync("key1", tenantId: "tenant-b"))!.Name, Is.EqualTo("Bob"));
-            Assert.That(await sut.GetAsync("key1"), Is.Null); // the global tenant is a third, separate tenant
+            Assert.That(await sut.GetAsync("key1"), Is.Null); // the default tenant is a third, separate tenant
         };
     }
 
@@ -618,13 +626,233 @@ internal sealed class CacheServiceTests
         await sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id1"] = new TestItem { Name = "Alice" } }, tenantId: "tenant-a");
 
         IDictionary<string, TestItem?> tenantA = await sut.GetItemsAsync(["id1"], tenantId: "tenant-a");
-        IDictionary<string, TestItem?> globalTenant = await sut.GetItemsAsync(["id1"]);
+        IDictionary<string, TestItem?> defaultTenant = await sut.GetItemsAsync(["id1"]);
 
         using (Assert.EnterMultipleScope())
         {
             Assert.That(tenantA["id1"]!.Name, Is.EqualTo("Alice"));
-            Assert.That(globalTenant["id1"], Is.Null);
+            Assert.That(defaultTenant["id1"], Is.Null);
         };
+    }
+
+    #endregion
+
+    #region Global scope
+
+    [Test]
+    public async Task Global_SetAsync_WithoutSuffix_UsesKeyWithoutTenant()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await sut.SetAsync(new TestItem { Name = "Alice" });
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(GlobalKey()), Is.True);
+            Assert.That(_memoryCache.TryGetValue(GlobalKey(), out object? _), Is.True);
+            Assert.That(_fakeDistCache.Contains(Key()), Is.False);
+        };
+    }
+
+    [Test]
+    public async Task Global_SetAsync_WithSuffix_UsesKeyWithoutTenant()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(GlobalKey("id1")), Is.True);
+            Assert.That(_memoryCache.TryGetValue(GlobalKey("id1"), out object? _), Is.True);
+            Assert.That(_fakeDistCache.Contains(Key("id1")), Is.False);
+            Assert.That((await sut.GetAsync("id1"))!.Name, Is.EqualTo("Alice"));
+        };
+    }
+
+    [Test]
+    public async Task Global_WithoutDefaultTenant_Works()
+    {
+        CacheService<TestItem> sut = CreateService(tenantId: null, scope: CacheScopes.Global);
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+        await sut.SetAsync(new TestItem { Name = "Config" });
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That((await sut.GetAsync("id1"))!.Name, Is.EqualTo("Alice"));
+            Assert.That((await sut.GetAsync())!.Name, Is.EqualTo("Config"));
+        };
+    }
+
+    [Test]
+    public async Task Global_IsSharedByAllTenants()
+    {
+        CacheService<TestItem> tenantA = CreateService(tenantId: "tenant-a", scope: CacheScopes.Global);
+        CacheService<TestItem> tenantB = CreateService(tenantId: "tenant-b", scope: CacheScopes.Global);
+
+        await tenantA.SetAsync(new TestItem { Name = "Shared" }, "id1");
+
+        Assert.That((await tenantB.GetAsync("id1"))!.Name, Is.EqualTo("Shared"));
+    }
+
+    [Test]
+    public async Task Global_DoesNotCollideWithTenantKeys()
+    {
+        CacheService<TestItem> tenantService = CreateService();
+        CacheService<TestItem> globalService = CreateService(scope: CacheScopes.Global);
+
+        await tenantService.SetAsync(new TestItem { Name = "Tenant" }, "id1");
+        await globalService.SetAsync(new TestItem { Name = "Global" }, "id1");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That((await tenantService.GetAsync("id1"))!.Name, Is.EqualTo("Tenant"));
+            Assert.That((await globalService.GetAsync("id1"))!.Name, Is.EqualTo("Global"));
+            Assert.That(_fakeDistCache.Contains(Key("id1")), Is.True);
+            Assert.That(_fakeDistCache.Contains(GlobalKey("id1")), Is.True);
+        };
+    }
+
+    [Test]
+    public async Task Global_SetItemsAsync_GetItemsAsync_UseKeysWithoutTenant()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await sut.SetItemsAsync(new Dictionary<string, TestItem>
+        {
+            ["id1"] = new TestItem { Name = "Alice" },
+            ["id2"] = new TestItem { Name = "Bob" },
+        });
+
+        bool inDistributed = _fakeDistCache.Contains(GlobalKey("id1")) && _fakeDistCache.Contains(GlobalKey("id2"));
+
+        _fakeDistCache.Clear();
+
+        IDictionary<string, TestItem?> results = await sut.GetItemsAsync(["id1", "id2"]); // served from memory
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(inDistributed, Is.True);
+            Assert.That(results["id1"]!.Name, Is.EqualTo("Alice"));
+            Assert.That(results["id2"]!.Name, Is.EqualTo("Bob"));
+        };
+    }
+
+    [Test]
+    public async Task Global_GetItemsAsync_RequestsKeysWithoutTenantFromDistributed()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await sut.GetItemsAsync(["id1", "id2"]);
+
+        Assert.That(_fakeDistCache.RequestedKeys, Is.EquivalentTo(new[] { GlobalKey("id1"), GlobalKey("id2") }));
+    }
+
+    [Test]
+    public async Task Global_RemoveAsync_RemovesFromBothCaches()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await sut.SetAsync(new TestItem { Name = "ToRemove" }, "id1");
+        await sut.SetAsync(new TestItem { Name = "ToKeep" }, "id2");
+
+        await sut.RemoveAsync("id1");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(await sut.GetAsync("id1"), Is.Null);
+            Assert.That(_fakeDistCache.Contains(GlobalKey("id1")), Is.False);
+            Assert.That((await sut.GetAsync("id2"))!.Name, Is.EqualTo("ToKeep"));
+        };
+    }
+
+    [Test]
+    public async Task Global_RemoveItemsAsync_RemovesFromBothCaches()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await sut.SetAsync(new TestItem { Name = "A" }, "id1");
+        await sut.SetAsync(new TestItem { Name = "B" }, "id2");
+        await sut.SetAsync(new TestItem { Name = "C" }, "id3");
+
+        await sut.RemoveItemsAsync(["id1", "id2"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(await sut.GetAsync("id1"), Is.Null);
+            Assert.That(await sut.GetAsync("id2"), Is.Null);
+            Assert.That(_fakeDistCache.Contains(GlobalKey("id1")), Is.False);
+            Assert.That(_fakeDistCache.Contains(GlobalKey("id2")), Is.False);
+            Assert.That((await sut.GetAsync("id3"))!.Name, Is.EqualTo("C"));
+        };
+    }
+
+    [Test]
+    public async Task Global_GetAsync_WithTenantId_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetAsync(tenantId: "tenant-a").AsTask());
+    }
+
+    [Test]
+    public async Task Global_GetAsync_WithSuffixAndTenantId_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetAsync("id1", tenantId: "tenant-a").AsTask());
+    }
+
+    [Test]
+    public async Task Global_GetItemsAsync_WithTenantId_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetItemsAsync(["id1"], tenantId: "tenant-a").AsTask());
+    }
+
+    [Test]
+    public async Task Global_SetAsync_WithTenantId_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.SetAsync(new TestItem { Name = "Alice" }, "id1", tenantId: "tenant-a").AsTask());
+    }
+
+    [Test]
+    public async Task Global_SetItemsAsync_WithTenantId_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id1"] = new TestItem { Name = "Alice" } }, tenantId: "tenant-a").AsTask());
+    }
+
+    [Test]
+    public async Task Global_RemoveAsync_WithTenantId_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.RemoveAsync("id1", tenantId: "tenant-a").AsTask());
+    }
+
+    [Test]
+    public async Task Global_RemoveItemsAsync_WithTenantId_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.RemoveItemsAsync(["id1"], tenantId: "tenant-a").AsTask());
+    }
+
+    [Test]
+    public async Task Global_DistributedFailure_StillStoresInMemoryAndDoesNotThrow()
+    {
+        CacheService<TestItem> sut = CreateService(scope: CacheScopes.Global);
+        _fakeDistCache.FailWith = new InvalidOperationException("Redis down");
+
+        await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
+
+        Assert.That((await sut.GetAsync("id1"))!.Name, Is.EqualTo("Alice"));
     }
 
     #endregion
@@ -1231,13 +1459,57 @@ internal sealed class CacheServiceTests
     }
 
     [Test]
-    public async Task GetAsync_NullGlobalTenantWithTenantOverride_Works()
+    public async Task GetAsync_NullDefaultTenantWithTenantOverride_Works()
     {
         CacheService<TestItem> sut = CreateService(tenantId: null);
 
         await sut.SetAsync(new TestItem { Name = "Alice" }, tenantId: "tenant-a");
 
         Assert.That((await sut.GetAsync(tenantId: "tenant-a"))!.Name, Is.EqualTo("Alice"));
+    }
+
+    [Test]
+    public async Task SetItemsAsync_InvalidTenantId_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id1"] = new TestItem { Name = "Alice" } }, tenantId: "invalid tenant!").AsTask());
+    }
+
+    [Test]
+    public async Task SetItemsAsync_NullTenantIdWithNoDefaultTenant_ThrowsArgumentNullException()
+    {
+        CacheService<TestItem> sut = CreateService(tenantId: null);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id1"] = new TestItem { Name = "Alice" } }).AsTask());
+    }
+
+    [Test]
+    public async Task SetItemsAsync_InvalidTenantId_DoesNotStoreInAnyLayer()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id1"] = new TestItem { Name = "Alice" } }, tenantId: "invalid tenant!").AsTask());
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(_fakeDistCache.Contains(Key("id1", "invalid tenant!")), Is.False);
+            Assert.That(await sut.GetAsync("id1"), Is.Null);
+        };
+    }
+
+    [Test]
+    public async Task SetItemsAsync_DifferentSuffixesWithSameStringRepresentation_ThrowsArgumentException()
+    {
+        CacheService<TestItem> sut = CreateService();
+
+        Dictionary<FixedSuffix, TestItem> items = new()
+        {
+            [new FixedSuffix("dup")] = new TestItem { Name = "Alice" },
+            [new FixedSuffix("dup")] = new TestItem { Name = "Bob" },
+        };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.SetItemsAsync(items).AsTask());
     }
 
     [Test]
