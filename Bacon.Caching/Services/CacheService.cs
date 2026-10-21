@@ -426,7 +426,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
     private string GetCacheKey<TSuffix>(CacheScopes cacheScope, string? tenantId, string cacheKey, TSuffix? cacheKeySuffix)
     {
-        string suffix = cacheKeySuffix?.ToString() ?? string.Empty;
+        string suffix = cacheKeySuffix?.ToString()?.ToLowerInvariant() ?? string.Empty;
 
         if (cacheScope == CacheScopes.Global)
         {
