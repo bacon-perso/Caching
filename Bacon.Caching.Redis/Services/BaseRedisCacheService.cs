@@ -3,6 +3,7 @@ using Bacon.Caching.Redis.Models;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
 
 namespace Bacon.Caching.Redis.Services;
 
@@ -36,7 +37,7 @@ internal abstract class BaseRedisCacheService<TItem>(RedisCacheConnection redisC
         return CacheSerializerService.Deserialize<TItem?>(redisValue.ToString());
     }
 
-    public abstract Task<Dictionary<string, TItem?>> GetItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default);
+    public abstract Task<Dictionary<string, TItem?>> GetItemsAsync(ReadOnlyCollection<string> keys, CancellationToken cancellationToken = default);
 
     #endregion Get
 
@@ -51,7 +52,7 @@ internal abstract class BaseRedisCacheService<TItem>(RedisCacheConnection redisC
         await Connection.Database.StringSetAsync(key, CacheSerializerService.Serialize(value), cacheDuration);
     }
 
-    public async Task SetItemsAsync(IDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default)
+    public async Task SetItemsAsync(IReadOnlyDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -92,7 +93,7 @@ internal abstract class BaseRedisCacheService<TItem>(RedisCacheConnection redisC
         await Connection.Database.KeyDeleteAsync(key);
     }
 
-    public abstract Task RemoveItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default);
+    public abstract Task RemoveItemsAsync(IReadOnlyCollection<string> keys, CancellationToken cancellationToken = default);
 
     #endregion Remove
 
@@ -123,10 +124,10 @@ internal abstract class BaseRedisCacheService<TItem>(RedisCacheConnection redisC
         }
     }
 
-    protected static Dictionary<string, TItem?> ToDictionary(string[] keys, TItem?[] values)
+    protected static Dictionary<string, TItem?> ToDictionary(ReadOnlyCollection<string> keys, TItem?[] values)
     {
-        Dictionary<string, TItem?> returnValues = new(keys.Length);
-        for (int idx = 0; idx < keys.Length; ++idx)
+        Dictionary<string, TItem?> returnValues = new(keys.Count);
+        for (int idx = 0; idx < keys.Count; ++idx)
         {
             returnValues.Add(keys[idx], values[idx]);
         }

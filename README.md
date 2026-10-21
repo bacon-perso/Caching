@@ -1,6 +1,6 @@
 # Bacon.Caching
 
-A .NET dual-layer cache library. Items are stored in both in-process memory and a distributed cache (Redis). On reads, memory is checked first; on a miss the distributed cache is queried and the result is backfilled into memory. If the distributed cache is unavailable the library degrades gracefully — errors are logged and reads return `null` instead of throwing.
+A .NET dual-layer cache library. Items are stored in both in-process memory and a distributed cache (Redis). On reads, memory is checked first; on a miss the distributed cache is queried and the result is backfilled into memory. If the distributed cache is unavailable the library degrades gracefully — errors are logged and reads return `null` instead of throwing. `GetOrCreateAsync` and `GetOrCreateItemsAsync` also load the items that are not cached from your own source and protect it from stampedes: concurrent misses for the same key share a single load.
 
 ## Installation
 
@@ -24,6 +24,12 @@ Redis moved out of the core package, which is a breaking change:
 - `CacheServerOptions.DistributedCacheType`, `DistributedCacheOptions`, `HealthCheckOptions` and `LoggerFactory` are gone. Set the Redis options in the `AddRedis` action instead (`Server`, `Port`, `Password`, `UseSsl`, `HealthCheckOptions`, `LoggerFactory`, …).
 - `RedisCacheOptions` is now in the `Bacon.Caching.Redis.Models` namespace.
 - A new `RedisCacheOptions.ServerType` (`Standalone` by default) declares whether you connect to a standalone server or to a Redis Cluster.
+
+### Upgrading to the release with `GetOrCreateAsync`
+
+- `GetItemsAsync` returns an `IReadOnlyDictionary<TSuffix, TItem?>` (a new dictionary per call) instead of an `IDictionary`, and `SetItemsAsync` takes an `IReadOnlyDictionary<TSuffix, TItem>`. A `Dictionary` can still be passed to `SetItemsAsync`; code that modified the dictionary returned by `GetItemsAsync` must copy it first.
+- `GetOrCreateAsync` and `GetOrCreateItemsAsync` are new: see "Load on a miss".
+- A distributed cache provider that implements `IDistributedCacheService<T>` must update three signatures: `GetItemsAsync(ReadOnlyCollection<string> keys, ...)`, `RemoveItemsAsync(IReadOnlyCollection<string> keys, ...)` and `SetItemsAsync(IReadOnlyDictionary<string, TItem> items, ...)`.
 
 ## Setup
 
@@ -125,21 +131,28 @@ public class WeatherForecastController(ICacheService<WeatherForecast> weatherFor
     [HttpGet]
     public async Task<WeatherForecast> GetAsync(CancellationToken cancellationToken)
     {
-        // Try the cache first
-        WeatherForecast? cached = await weatherForecastCacheService.GetAsync(cancellationToken: cancellationToken);
-        if (cached is not null)
-        {
-            return cached;
-        }
+        // The cached forecast, or loaded once from the source and cached (see "Load on a miss")
+        WeatherForecast? forecast = await weatherForecastCacheService.GetOrCreateAsync(
+            async ct => await FetchFromSourceAsync(ct),
+            cancellationToken: cancellationToken);
 
-        WeatherForecast forecast = FetchFromSource();
-
-        // Store in the memory and the distributed cache
-        await weatherForecastCacheService.SetAsync(forecast, cancellationToken: cancellationToken);
-
-        return forecast;
+        return forecast ?? throw new InvalidOperationException("No forecast available");
     }
 }
+```
+
+To work with the cache yourself, `GetAsync` only looks: it returns the cached item or `null` and never loads anything (an item found only in the distributed cache is copied into memory). `SetAsync` stores an item in both layers:
+
+```csharp
+WeatherForecast? cached = await weatherForecastCacheService.GetAsync(cancellationToken: cancellationToken);
+if (cached is not null)
+{
+    return cached;
+}
+
+WeatherForecast forecast = FetchFromSource();
+
+await weatherForecastCacheService.SetAsync(forecast, cancellationToken: cancellationToken);
 ```
 
 All methods return `ValueTask`/`ValueTask<T>` and take an optional `tenantId` and `CancellationToken`.
@@ -165,6 +178,42 @@ The suffix can be any non-null value (`string`, `int`, `Guid`, an enum, …). It
 
 A `null` suffix throws `ArgumentNullException`.
 
+### Load on a miss: `GetOrCreateAsync`
+
+`GetOrCreateAsync` returns the cached item and, when it is not cached, loads it with a factory you provide, stores it in both layers and returns it. It replaces the usual "get, load when null, set" code:
+
+```csharp
+// Without a suffix: a single item, such as a configuration object
+WeatherForecast? current = await weatherForecastCacheService.GetOrCreateAsync(
+    async ct => await repository.LoadCurrentAsync(ct),
+    cancellationToken: cancellationToken);
+
+// With a suffix
+WeatherForecast? forecast = await weatherForecastCacheService.GetOrCreateAsync(
+    dayIndex,
+    async ct => await repository.LoadForecastAsync(dayIndex, ct),
+    cancellationToken: cancellationToken);
+
+// With a tenant, named like on every other call
+WeatherForecast? other = await weatherForecastCacheService.GetOrCreateAsync(
+    dayIndex,
+    async ct => await repository.LoadForecastAsync(dayIndex, ct),
+    tenantId: "tenant-abc",
+    cancellationToken: cancellationToken);
+```
+
+The factory is where you call your database (or any other source) and build the final object: whatever it returns is what gets cached. It returns `null` when the item does not exist.
+
+**Stampede protection.** When a popular key expires, every concurrent request would reach your source. Here, concurrent misses for the same key share one call to the factory, and every caller receives its result:
+
+- A cache hit never touches this mechanism: it is as cheap as `GetAsync`.
+- **Cancellation.** Your `CancellationToken` only cancels *your* wait. The token passed to the factory is shared by every caller waiting on the load and is canceled only when all of them have canceled, so pass it to your database call. A factory that ignores it runs to completion and its result is still cached.
+- **Failures.** If the factory throws, every caller waiting on that load receives the exception (it is not logged), nothing is cached, and the next call tries again.
+- **Not found.** A `null` result is returned and **not cached**, so repeated requests for a missing key reach your source every time. Throw after the call if a missing item is an error for you.
+- **Scope.** The protection is per process. With several nodes a hot key can still be loaded once per node when it expires, which is far fewer than once per request.
+- The factory of the first caller runs on behalf of everyone waiting on the same key, so do not capture request-scoped objects in it (resolve what it needs from a singleton, or inside the factory).
+- If both layers are disabled for the type, the factory is simply called every time.
+
 ### Batch operations
 
 ```csharp
@@ -179,7 +228,7 @@ Dictionary<int, WeatherForecast> weatherDic = new()
 await weatherForecastCacheService.SetItemsAsync(weatherDic, cancellationToken: cancellationToken);
 
 // Retrieve all of them in one call: one entry per distinct suffix, null when not cached
-IDictionary<int, WeatherForecast?> results = await weatherForecastCacheService.GetItemsAsync(weatherDic.Keys, cancellationToken: cancellationToken);
+IReadOnlyDictionary<int, WeatherForecast?> results = await weatherForecastCacheService.GetItemsAsync(weatherDic.Keys, cancellationToken: cancellationToken);
 
 // Remove several items at once
 await weatherForecastCacheService.RemoveItemsAsync([1, 2, 3], cancellationToken: cancellationToken);
@@ -188,6 +237,34 @@ await weatherForecastCacheService.RemoveItemsAsync([1, 2, 3], cancellationToken:
 Duplicate suffixes are ignored. The collections cannot be null; an empty collection does nothing (`GetItemsAsync` returns an empty dictionary). Suffixes cannot be null or blank, and `SetItemsAsync` values cannot be null.
 
 In Redis these operations are executed in batches (`GetBatchSize`, `InsertBatchSize`, `RemoveBatchSize`, up to two batches in flight at a time) so very large collections do not block the server. See "Redis Cluster" for how this works with a cluster.
+
+### Load several on a miss: `GetOrCreateItemsAsync`
+
+`GetOrCreateItemsAsync` does the same for several items, and is the natural way to fill the cache in bulk: it reads what is cached, calls your factory **once** with only the suffixes that are missing (one database query instead of one per item), stores what the factory found in a single batch and returns everything together.
+
+```csharp
+int[] days = [1, 2, 3, 4, 5];
+
+IReadOnlyDictionary<int, WeatherForecast?> forecasts = await weatherForecastCacheService.GetOrCreateItemsAsync(
+    days,
+    async (missingDays, ct) => await repository.LoadForecastsAsync(missingDays, ct),   // returns IReadOnlyDictionary<int, WeatherForecast?>
+    cancellationToken: cancellationToken);
+
+// The result has one entry per distinct suffix: null when the item exists nowhere
+int[] notFound = [.. forecasts.Where(w => w.Value is null).Select(s => s.Key)];
+
+if (notFound.Length != 0)
+{
+    throw new KeyNotFoundException($"No forecast for days: {string.Join(", ", notFound)}");
+}
+```
+
+- With 100 suffixes of which 90 are cached, the factory receives the 10 missing ones. The factory returns the items it found keyed by suffix; a suffix it leaves out, or returns with a `null` value, is considered not found. Not-found items are not cached.
+- **Check for missing items after the call, not inside the factory.** Throwing from the factory fails the whole batch: the items that were found are not cached and every waiting caller receives the exception.
+- Concurrent callers share the loads per key, even when their suffixes only overlap: caller A asking for days 1–3 and caller B asking for days 3–5 load day 3 once. The factory may therefore receive fewer suffixes than were missing for the call, or not be called at all when everything is cached or already being loaded by someone else. Loads started by `GetOrCreateAsync` are shared in the same way.
+- Cancellation, failures, the per-process scope and the advice about request-scoped objects are the same as for `GetOrCreateAsync`. A factory that returns `null` instead of a dictionary fails the load with an `InvalidOperationException`.
+- Duplicate suffixes are ignored, and an empty collection returns an empty dictionary without calling the factory.
+- If both layers are disabled for the type, the factory is called directly with every suffix.
 
 ### Multi-tenancy
 
@@ -236,6 +313,8 @@ await cache.GetAsync("abc", "tenant-abc");    // suffix "abc",         tenant "t
 await cache.GetAsync();                       // no suffix,           default tenant
 
 await cache.SetAsync(item, tenantId: "abc");  // same rule for SetAsync and RemoveAsync
+
+await cache.GetOrCreateAsync(factory, tenantId: "abc");   // and for GetOrCreateAsync(factory), no suffix
 ```
 
 Be careful when the tenant comes from a variable that can be `null`: `cache.GetAsync(tenant)` binds to the *suffix* overload and throws `ArgumentNullException` for `null`. Always use the named form (`GetAsync(tenantId: tenant)`) or branch on the value.
@@ -245,6 +324,8 @@ This resolution is implemented with `[OverloadResolutionPriority(1)]` on the suf
 ### Invalidation
 
 Items are always removed by explicit key through `RemoveAsync` (no suffix), `RemoveAsync(suffix)` and `RemoveItemsAsync(suffixes)`; there is no prefix or "flush all" operation.
+
+A removal made while a `GetOrCreateAsync` load is in flight does not stop that load from storing its result, so the item can be cached again with data read before the removal. It expires normally.
 
 `RemoveItemsAsync` deletes Redis keys in batches of `RemoveBatchSize`, so a failure can leave some keys removed and others not. A failing batch does not stop the others: every batch is attempted, the failures are logged together, and the memory cache is still cleared for every key.
 
@@ -261,7 +342,8 @@ Items are always removed by explicit key through `RemoveAsync` (no suffix), `Rem
 - **A Redis outage costs latency, not exceptions.** While Redis is down, a read that misses the memory cache has to reach Redis. At best the client already knows it is disconnected and the call fails instantly; at worst the outage has not been detected yet and the call waits for the Redis timeout (`SyncTimeout`, 5 seconds by default). Either way the failure is logged and the read returns `null`, so the outage shows up as a delay at worst, never as an exception. Memory hits are not affected. Be careful when lowering `SyncTimeout` to shorten that worst-case delay: a busy Redis that is simply slower than usual would then start timing out, and its calls would be logged as failures instead of succeeding.
 - **Redis writes are awaited.** `SetAsync` / `SetItemsAsync` wait for Redis to confirm the write. Each key is written with its TTL in a single atomic command. `SetItemsAsync` attempts every batch even if one fails; the failures are logged together and the memory cache is still written.
 - **Synchronous completion.** When no distributed I/O is needed (memory-only, a memory hit, or disabled caches) the returned `ValueTask` is already completed, so awaiting it neither allocates a task nor yields.
-- **Cancellation.** The token is checked before an operation starts and between Redis batches; an operation already sent to Redis cannot be interrupted. A canceled token throws `OperationCanceledException`.
+- **Cancellation.** The token is checked before an operation starts and between Redis batches; an operation already sent to Redis cannot be interrupted. A canceled token throws `OperationCanceledException`. For `GetOrCreateAsync` / `GetOrCreateItemsAsync` it only cancels the caller's wait; see "Load on a miss".
+- **Loading on a miss.** Unlike cache errors, an exception thrown by your factory is not logged: it is thrown to every caller waiting on that load.
 
 ### Exceptions
 
@@ -273,6 +355,9 @@ Items are always removed by explicit key through `RemoveAsync` (no suffix), `Rem
 | Empty or invalid tenant ID | `ArgumentException` |
 | Tenant ID passed to a `Global` type | `ArgumentException` |
 | Canceled `CancellationToken` | `OperationCanceledException` |
+| Null factory passed to `GetOrCreateAsync` / `GetOrCreateItemsAsync` | `ArgumentNullException` |
+| Exception thrown by your factory | The same exception, to every caller waiting on that load |
+| `GetOrCreateItemsAsync` factory returns `null` instead of a dictionary | `InvalidOperationException`, to every caller waiting on that load |
 
 ## Configuration reference
 

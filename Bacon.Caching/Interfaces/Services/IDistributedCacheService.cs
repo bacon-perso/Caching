@@ -1,4 +1,6 @@
-﻿namespace Bacon.Caching.Interfaces.Services;
+﻿using System.Collections.ObjectModel;
+
+namespace Bacon.Caching.Interfaces.Services;
 
 /// <summary>
 /// Contract implemented by a distributed cache provider (for example Redis). The keys received are the final cache keys built by the library, so a provider stores and reads them as they are.
@@ -28,7 +30,7 @@ public interface IDistributedCacheService<TItem>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A dictionary containing one entry per requested key: the key, and the item or null/default if not present.</returns>
     /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
-    Task<Dictionary<string, TItem?>> GetItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default);
+    Task<Dictionary<string, TItem?>> GetItemsAsync(ReadOnlyCollection<string> keys, CancellationToken cancellationToken = default);
 
     #endregion Get
 
@@ -51,7 +53,7 @@ public interface IDistributedCacheService<TItem>
     /// <param name="cacheDuration">How long the items stay in the distributed cache. It applies to every item.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
-    Task SetItemsAsync(IDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default);
+    Task SetItemsAsync(IReadOnlyDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default);
 
     #endregion Set
 
@@ -71,7 +73,7 @@ public interface IDistributedCacheService<TItem>
     /// <param name="keys">The final cache keys.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <exception cref="OperationCanceledException">The operation was canceled through the cancellation token.</exception>
-    Task RemoveItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default);
+    Task RemoveItemsAsync(IReadOnlyCollection<string> keys, CancellationToken cancellationToken = default);
 
     #endregion Remove
 }

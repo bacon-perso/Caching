@@ -3,6 +3,7 @@ using Bacon.Caching.Redis.Models;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
 
 namespace Bacon.Caching.Redis.Services;
 
@@ -11,27 +12,26 @@ internal sealed class StandaloneCacheService<TItem>(RedisCacheConnection redisCa
 {
     #region Get
 
-    public override async Task<Dictionary<string, TItem?>> GetItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
+    public override async Task<Dictionary<string, TItem?>> GetItemsAsync(ReadOnlyCollection<string> keys, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         ValidateIsConnected(ConnectionErrorMessage + nameof(GetItemsAsync));
 
-        string[] cacheKeys = [.. keys];
-        TItem?[] values = new TItem?[cacheKeys.Length];
+        TItem?[] values = new TItem?[keys.Count];
 
         int batchSize = RedisOptions.GetBatchSize;
-        int batchCount = (cacheKeys.Length + batchSize - 1) / batchSize;
+        int batchCount = (keys.Count + batchSize - 1) / batchSize;
 
         await Parallel.ForEachAsync(Enumerable.Range(0, batchCount), CreateParallelOptions(cancellationToken), async (batchIndex, _) =>
         {
             int start = batchIndex * batchSize;
-            int length = Math.Min(batchSize, cacheKeys.Length - start);
+            int length = Math.Min(batchSize, keys.Count - start);
 
             RedisKey[] redisKeys = new RedisKey[length];
             for (int idx = 0; idx < length; ++idx)
             {
-                redisKeys[idx] = cacheKeys[start + idx];
+                redisKeys[idx] = keys[start + idx];
             }
 
             RedisValue[] redisValues = await Connection.Database.StringGetAsync(redisKeys, CommandFlags.None);
@@ -45,14 +45,14 @@ internal sealed class StandaloneCacheService<TItem>(RedisCacheConnection redisCa
             }
         });
 
-        return ToDictionary(cacheKeys, values);
+        return ToDictionary(keys, values);
     }
 
     #endregion Get
 
     #region Remove
 
-    public override async Task RemoveItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
+    public override async Task RemoveItemsAsync(IReadOnlyCollection<string> keys, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 

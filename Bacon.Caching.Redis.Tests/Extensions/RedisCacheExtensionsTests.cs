@@ -4,6 +4,7 @@ using Bacon.Caching.Models;
 using Bacon.Caching.Redis.Extensions;
 using Bacon.Caching.Redis.Models;
 using Microsoft.Extensions.DependencyInjection;
+using System.Collections.ObjectModel;
 
 namespace Bacon.Caching.Redis.Tests.Extensions;
 
@@ -17,15 +18,15 @@ internal sealed class RedisCacheExtensionsTests
     {
         public Task<TItem?> GetAsync(string key, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
-        public Task<Dictionary<string, TItem?>> GetItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<Dictionary<string, TItem?>> GetItemsAsync(ReadOnlyCollection<string> keys, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
         public Task SetAsync(string key, TItem value, TimeSpan cacheDuration, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
-        public Task SetItemsAsync(IDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task SetItemsAsync(IReadOnlyDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
         public Task RemoveAsync(string key, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
-        public Task RemoveItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task RemoveItemsAsync(IReadOnlyCollection<string> keys, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 
     private static CacheBuilder CreateBuilder()

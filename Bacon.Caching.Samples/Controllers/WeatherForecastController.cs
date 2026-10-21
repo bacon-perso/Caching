@@ -30,9 +30,13 @@ public class WeatherForecastController(ICacheService<WeatherForecast> weatherFor
             weatherDic.Add(idx, weatherForecasts[idx -1]);
         }
 
+        IReadOnlyCollection<int> keys = weatherDic.Keys;
+
+        IReadOnlyDictionary<int, WeatherForecast?> weatherCacheDic = await weatherForecastCacheService.GetOrCreateItemsAsync(keys, async (keys, ct) => { return await ValueTask.FromResult(weatherDic); }, cancellationToken: cancellationToken);
+
         await weatherForecastCacheService.SetItemsAsync(weatherDic, cancellationToken: cancellationToken);
 
-        IDictionary<int, WeatherForecast?> weatherCacheDic = await weatherForecastCacheService.GetItemsAsync(weatherDic.Select(s => s.Key), cancellationToken: cancellationToken);
+        weatherCacheDic = await weatherForecastCacheService.GetItemsAsync(keys, cancellationToken: cancellationToken);
 
         WeatherForecast? weatherForecast = await weatherForecastCacheService.GetAsync(1, tenantId: Constants.TenantId, cancellationToken: cancellationToken);
 

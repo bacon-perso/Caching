@@ -3,6 +3,7 @@ using Bacon.Caching.Redis.Models;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
 
 namespace Bacon.Caching.Redis.Services;
 
@@ -11,16 +12,15 @@ internal sealed class ClusterCacheService<TItem>(RedisCacheConnection redisCache
 {
     #region Get
 
-    public override async Task<Dictionary<string, TItem?>> GetItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
+    public override async Task<Dictionary<string, TItem?>> GetItemsAsync(ReadOnlyCollection<string> keys, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         ValidateIsConnected(ConnectionErrorMessage + nameof(GetItemsAsync));
 
-        string[] cacheKeys = [.. keys];
-        TItem?[] values = new TItem?[cacheKeys.Length];
+        TItem?[] values = new TItem?[keys.Count];
 
-        (string Key, int Index)[][] batches = CreateBatches(cacheKeys, RedisOptions.GetBatchSize, key => Connection.Multiplexer.HashSlot(key));
+        (string Key, int Index)[][] batches = CreateBatches(keys, RedisOptions.GetBatchSize, key => Connection.Multiplexer.HashSlot(key));
 
         foreach ((string Key, int Index)[][] wave in CreateWaves(batches, RedisOptions.GetBatchSize * MaxParallelBatches))
         {
@@ -29,14 +29,14 @@ internal sealed class ClusterCacheService<TItem>(RedisCacheConnection redisCache
             await Task.WhenAll(wave.Select(batch => GetBatchAsync(batch, values)));
         }
 
-        return ToDictionary(cacheKeys, values);
+        return ToDictionary(keys, values);
     }
 
     #endregion Get
 
     #region Remove
 
-    public override async Task RemoveItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
+    public override async Task RemoveItemsAsync(IReadOnlyCollection<string> keys, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -82,7 +82,7 @@ internal sealed class ClusterCacheService<TItem>(RedisCacheConnection redisCache
     /// <summary>
     /// Splits the keys into batches of at most <paramref name="batchSize"/> keys that never mix hash slots, keeping each key's original index.
     /// </summary>
-    internal static (string Key, int Index)[][] CreateBatches(string[] keys, int batchSize, Func<string, int> getSlot)
+    internal static (string Key, int Index)[][] CreateBatches(ReadOnlyCollection<string> keys, int batchSize, Func<string, int> getSlot)
     {
         return [.. keys
             .Select((key, index) => (Key: key, Index: index))

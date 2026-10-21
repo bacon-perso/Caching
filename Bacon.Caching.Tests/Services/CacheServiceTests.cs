@@ -254,7 +254,7 @@ internal sealed class CacheServiceTests
             ["id2"] = new TestItem { Name = "Bob" },
         });
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -293,7 +293,7 @@ internal sealed class CacheServiceTests
 
         await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "missing"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "missing"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -309,7 +309,7 @@ internal sealed class CacheServiceTests
 
         _fakeDistCache.Seed(Key("id1"), new TestItem { Name = "FromRedis" });
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1"]);
 
         Assert.That(result["id1"]!.Name, Is.EqualTo("FromRedis"));
     }
@@ -325,7 +325,7 @@ internal sealed class CacheServiceTests
         _fakeDistCache.Seed(Key("id2"), new TestItem { Name = "FromRedis" });
         _fakeDistCache.RequestedKeys.Clear();
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -346,7 +346,7 @@ internal sealed class CacheServiceTests
 
         _fakeDistCache.Clear();
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1"]);
 
         Assert.That(result["id1"]!.Name, Is.EqualTo("FromRedis"));
     }
@@ -358,7 +358,7 @@ internal sealed class CacheServiceTests
 
         _fakeDistCache.Seed(Key("id1"), new TestItem { Name = "FromRedis" });
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "missing"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "missing"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -374,7 +374,7 @@ internal sealed class CacheServiceTests
 
         await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id1", "id2"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id1", "id2"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -395,7 +395,7 @@ internal sealed class CacheServiceTests
             [2] = new TestItem { Name = "Bob" },
         });
 
-        IDictionary<int, TestItem?> result = await sut.GetItemsAsync([1, 2, 3]);
+        IReadOnlyDictionary<int, TestItem?> result = await sut.GetItemsAsync([1, 2, 3]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -410,7 +410,7 @@ internal sealed class CacheServiceTests
     {
         CacheService<TestItem> sut = CreateService(memDuration: TimeSpan.Zero, distDuration: TimeSpan.Zero);
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -514,7 +514,7 @@ internal sealed class CacheServiceTests
 
         _fakeDistCache.FailWith = new InvalidOperationException("redis down");
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -629,8 +629,8 @@ internal sealed class CacheServiceTests
 
         await sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id1"] = new TestItem { Name = "Alice" } }, tenantId: "tenant-a");
 
-        IDictionary<string, TestItem?> tenantA = await sut.GetItemsAsync(["id1"], tenantId: "tenant-a");
-        IDictionary<string, TestItem?> defaultTenant = await sut.GetItemsAsync(["id1"]);
+        IReadOnlyDictionary<string, TestItem?> tenantA = await sut.GetItemsAsync(["id1"], tenantId: "tenant-a");
+        IReadOnlyDictionary<string, TestItem?> defaultTenant = await sut.GetItemsAsync(["id1"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -733,7 +733,7 @@ internal sealed class CacheServiceTests
 
         _fakeDistCache.Clear();
 
-        IDictionary<string, TestItem?> results = await sut.GetItemsAsync(["id1", "id2"]); // served from memory
+        IReadOnlyDictionary<string, TestItem?> results = await sut.GetItemsAsync(["id1", "id2"]); // served from memory
 
         using (Assert.EnterMultipleScope())
         {
@@ -911,7 +911,7 @@ internal sealed class CacheServiceTests
         await sut.SetAsync(new TestItem { Name = "MemOnly" }, "key1");
         await sut.SetItemsAsync(new Dictionary<string, TestItem> { ["key2"] = new TestItem { Name = "MemOnly2" } });
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["key1", "key2"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["key1", "key2"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -1017,7 +1017,7 @@ internal sealed class CacheServiceTests
 
         _fakeDistCache.Seed(Key("id1"), new TestItem { Name = "Changed" }); // proves the read goes to the distributed cache
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(["id1", "id2"]);
 
         using (Assert.EnterMultipleScope())
         {
@@ -1073,7 +1073,7 @@ internal sealed class CacheServiceTests
         await sut.SetItemsAsync(new Dictionary<string, TestItem> { ["id2"] = new TestItem { Name = "Bob" } });
 
         TestItem? single = await sut.GetAsync("id1");
-        IDictionary<string, TestItem?> multiple = await sut.GetItemsAsync(["id1", "id2"]);
+        IReadOnlyDictionary<string, TestItem?> multiple = await sut.GetItemsAsync(["id1", "id2"]);
 
         await sut.RemoveAsync("id1");
         await sut.RemoveItemsAsync(["id1", "id2"]);
@@ -1169,10 +1169,10 @@ internal sealed class CacheServiceTests
 
         await sut.SetAsync(new TestItem { Name = "Alice" }, "id1");
 
-        ValueTask<IDictionary<string, TestItem?>> task = sut.GetItemsAsync(["id1", "missing"]);
+        ValueTask<IReadOnlyDictionary<string, TestItem?>> task = sut.GetItemsAsync(["id1", "missing"]);
         bool isCompleted = task.IsCompletedSuccessfully;
 
-        IDictionary<string, TestItem?> result = await task;
+        IReadOnlyDictionary<string, TestItem?> result = await task;
 
         using (Assert.EnterMultipleScope())
         {
@@ -1266,7 +1266,7 @@ internal sealed class CacheServiceTests
         bool getCompleted = get.IsCompletedSuccessfully;
         await get;
 
-        ValueTask<IDictionary<string, TestItem?>> getItems = sut.GetItemsAsync(["id1"]);
+        ValueTask<IReadOnlyDictionary<string, TestItem?>> getItems = sut.GetItemsAsync(["id1"]);
         bool getItemsCompleted = getItems.IsCompletedSuccessfully;
         await getItems;
 
@@ -1346,7 +1346,7 @@ internal sealed class CacheServiceTests
     {
         CacheService<TestItem> sut = CreateService();
 
-        IDictionary<string, TestItem?> result = await sut.GetItemsAsync(Array.Empty<string>());
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetItemsAsync(Array.Empty<string>());
 
         Assert.That(result, Is.Empty);
         Assert.That(_fakeDistCache.RequestedKeys, Is.Empty);

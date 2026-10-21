@@ -1,5 +1,6 @@
 ﻿using Bacon.Caching.Interfaces.Services;
 using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
 
 namespace Bacon.Caching.Tests.Fakes;
 
@@ -26,7 +27,7 @@ internal sealed class FakeDistributedCacheService<TItem> : IDistributedCacheServ
         return Task.FromResult(value);
     }
 
-    public Task<Dictionary<string, TItem?>> GetItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
+    public Task<Dictionary<string, TItem?>> GetItemsAsync(ReadOnlyCollection<string> keys, CancellationToken cancellationToken = default)
     {
         ThrowIfFailing();
 
@@ -53,7 +54,7 @@ internal sealed class FakeDistributedCacheService<TItem> : IDistributedCacheServ
         return Task.CompletedTask;
     }
 
-    public Task SetItemsAsync(IDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default)
+    public Task SetItemsAsync(IReadOnlyDictionary<string, TItem> items, TimeSpan cacheDuration, CancellationToken cancellationToken = default)
     {
         ThrowIfFailing();
 
@@ -74,7 +75,7 @@ internal sealed class FakeDistributedCacheService<TItem> : IDistributedCacheServ
         return Task.CompletedTask;
     }
 
-    public Task RemoveItemsAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
+    public Task RemoveItemsAsync(IReadOnlyCollection<string> keys, CancellationToken cancellationToken = default)
     {
         ThrowIfFailing();
 

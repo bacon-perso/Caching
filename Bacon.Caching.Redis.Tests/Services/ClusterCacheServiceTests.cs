@@ -35,7 +35,7 @@ internal sealed class ClusterCacheServiceTests
     {
         string[] keys = Keys(10);
 
-        (string Key, int Index)[][] batches = ClusterCacheService<object>.CreateBatches(keys, 4, _ => -1);
+        (string Key, int Index)[][] batches = ClusterCacheService<object>.CreateBatches(keys.AsReadOnly(), 4, _ => -1);
 
         using (Assert.EnterMultipleScope())
         {
@@ -50,7 +50,7 @@ internal sealed class ClusterCacheServiceTests
     {
         string[] keys = Keys(10);
 
-        (string Key, int Index)[][] batches = ClusterCacheService<object>.CreateBatches(keys, 2, key => key[^1] % 3);
+        (string Key, int Index)[][] batches = ClusterCacheService<object>.CreateBatches(keys.AsReadOnly(), 2, key => key[^1] % 3);
 
         using (Assert.EnterMultipleScope())
         {
@@ -65,7 +65,7 @@ internal sealed class ClusterCacheServiceTests
     public void CreateBatches_MixedSlotsWithLargeBatchSize_DoesNotMergeSlots()
     {
         // key0, key3, key6, key9 -> slot 0; key1, key4, key7 -> slot 1; key2, key5, key8 -> slot 2
-        (string Key, int Index)[][] batches = ClusterCacheService<object>.CreateBatches(Keys(10), 100, key => key[^1] % 3);
+        (string Key, int Index)[][] batches = ClusterCacheService<object>.CreateBatches(Keys(10).AsReadOnly(), 100, key => key[^1] % 3);
 
         Assert.That(batches.Select(batch => batch.Length).Order(), Is.EqualTo(_slotGroupSizes));
     }
@@ -73,7 +73,7 @@ internal sealed class ClusterCacheServiceTests
     [Test]
     public void CreateBatches_BatchSizeOne_ReturnsOneKeyPerBatch()
     {
-        (string Key, int Index)[][] batches = ClusterCacheService<object>.CreateBatches(Keys(5), 1, key => key[^1] % 2);
+        (string Key, int Index)[][] batches = ClusterCacheService<object>.CreateBatches(Keys(5).AsReadOnly(), 1, key => key[^1] % 2);
 
         using (Assert.EnterMultipleScope())
         {

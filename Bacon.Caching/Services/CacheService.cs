@@ -3,6 +3,7 @@ using Bacon.Caching.Models;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 
 namespace Bacon.Caching.Services;
@@ -10,25 +11,23 @@ namespace Bacon.Caching.Services;
 internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> cacheServerOptionsOptions, IOptions<CacheOptions<TItem>> cacheOptionsOptions, IMemoryCache memoryCache, ILogger<TItem> logger, IDistributedCacheService<TItem>? distributedCacheService = null)
     : ICacheService<TItem>
 {
-    #region CTOR
-
     private readonly CacheServerOptions _cacheServerOptions = cacheServerOptionsOptions.Value;
     private readonly CacheOptions<TItem> _cacheOptions = cacheOptionsOptions.Value;
-
-    #endregion CTOR
+    private readonly ConcurrentDictionary<string, InFlightLoad<TItem>> _inFlight = new();
 
     #region Public
 
     #region Get
 
-    public async ValueTask<TItem?> GetAsync(string? tenantId = null, CancellationToken cancellationToken = default)
-    {
-        return await GetAsync(string.Empty, tenantId: tenantId, cancellationToken: cancellationToken);
-    }
+    #region Get
+
+    public async ValueTask<TItem?> GetAsync(string? tenantId = null, CancellationToken cancellationToken = default) => await GetAsync(string.Empty, tenantId: tenantId, cancellationToken: cancellationToken);
 
     [OverloadResolutionPriority(1)]
     public async ValueTask<TItem?> GetAsync<TSuffix>(TSuffix cacheKeySuffix, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
     {
+        #region Validations
+
         ArgumentNullException.ThrowIfNull(cacheKeySuffix, nameof(cacheKeySuffix));
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -42,59 +41,17 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
             return defaultValue;
         }
 
+        #endregion Validations
+
         string cacheKey = GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
 
-        TItem? obj = defaultValue;
-
-        if (IsMemoryCacheEnabled(source))
-        {
-            try
-            {
-                obj = memoryCache.Get<TItem>(cacheKey);
-            }
-            catch (Exception ex)
-            {
-                LogMemoryCacheError(source, ex);
-            }
-        }
-
-        if (obj != null && !obj.Equals(defaultValue))
-        {
-            return obj;
-        }
-
-        LogNoMemoryItemCachedDebug(source);
-
-        if (IsDistributedCacheEnabled(source))
-        {
-            try
-            {
-                ValidateDistributedCache();
-
-                obj = await distributedCacheService!.GetAsync(cacheKey, cancellationToken: cancellationToken);
-
-                if (obj == null)
-                {
-                    LogNoDistributedItemCachedDebug(source);
-                    return obj;
-                }
-
-                if (IsMemoryCacheEnabled(source, isWrite: true))
-                {
-                    SetMemoryCache(cacheKey, obj, _cacheOptions.MemoryCacheDuration);
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                LogDistributedCacheError(source, ex);
-            }
-        }
-
-        return obj;
+        return await GetSingleItemAsync(source, cacheKey, cancellationToken);
     }
 
-    public async ValueTask<IDictionary<TSuffix, TItem?>> GetItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
+    public async ValueTask<IReadOnlyDictionary<TSuffix, TItem?>> GetItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
     {
+        #region Validations
+
         ArgumentNullException.ThrowIfNull(cacheKeySuffixes, nameof(cacheKeySuffixes));
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -109,7 +66,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
         TSuffix[] typedSuffixes = [.. cacheKeySuffixes.Distinct()];
 
-        ValidateCacheKeySuffixes(typedSuffixes, nameof(cacheKeySuffixes));
+        ValidateCacheKeyNullSuffixes(typedSuffixes, nameof(cacheKeySuffixes));
 
         TItem? defaultValue = default;
 
@@ -128,89 +85,146 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
             return MapCachedItems(items, relations);
         }
 
-        if (IsMemoryCacheEnabled(source))
-        {
-            try
-            {
-                foreach (KeyValuePair<string, TItem?> keyValuePair in items)
-                {
-                    items[keyValuePair.Key] = memoryCache.Get<TItem>(keyValuePair.Key);
-                }
-            }
-            catch (Exception ex)
-            {
-                LogMemoryCacheError(source, ex);
-            }
-        }
+        #endregion Validations
 
-        string[] missedFromMemory = [.. items.Where(w => w.Value == null || w.Value.Equals(defaultValue)).Select(s => s.Key)];
-
-        bool isDistributedCacheEnabled = IsDistributedCacheEnabled(source);
-
-        if (isDistributedCacheEnabled && missedFromMemory.Length == 0)
-        {
-            LogNoMissedMemoryCacheItemsDebug(source);
-        }
-        else if (isDistributedCacheEnabled && missedFromMemory.Length != 0)
-        {
-            try
-            {
-                ValidateDistributedCache();
-
-                Dictionary<string, TItem?> distributedCacheValues = await distributedCacheService!.GetItemsAsync(missedFromMemory, cancellationToken: cancellationToken);
-
-                if (distributedCacheValues.Count == 0)
-                {
-                    LogNoDistributedItemCachedDebug(source);
-                }
-                else
-                {
-                    bool isMemoryCacheEnabled = IsMemoryCacheEnabled(source, isWrite: true);
-
-                    MemoryCacheEntryOptions? memoryCacheEntryOptions = null;
-                    if (isMemoryCacheEnabled)
-                    {
-                        LogSyncMemoryCacheFromDistributedCacheDebug(source);
-
-                        memoryCacheEntryOptions ??= new()
-                        {
-                            SlidingExpiration = null,
-                            AbsoluteExpirationRelativeToNow = _cacheOptions.MemoryCacheDuration
-                        };
-                    }
-
-                    foreach (KeyValuePair<string, TItem?> distributedCacheValue in distributedCacheValues)
-                    {
-                        if (isMemoryCacheEnabled && distributedCacheValue.Value is not null)
-                        {
-                            SetMemoryCache(distributedCacheValue.Key, distributedCacheValue.Value, _cacheOptions.MemoryCacheDuration, memoryCacheEntryOptions: memoryCacheEntryOptions);
-                        }
-
-                        items[distributedCacheValue.Key] = distributedCacheValue.Value;
-                    }
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                LogDistributedCacheError(source, ex);
-            }
-        }
+        items = await GetManyItemsAsync(source, items, cancellationToken);
 
         return MapCachedItems(items, relations);
     }
 
     #endregion Get
 
+    #region GetOrCreate
+
+    public async ValueTask<TItem?> GetOrCreateAsync(Func<CancellationToken, ValueTask<TItem?>> factory, string? tenantId = null, CancellationToken cancellationToken = default) => await GetOrCreateAsync(string.Empty, factory, tenantId: tenantId, cancellationToken: cancellationToken);
+
+    [OverloadResolutionPriority(1)]
+    public async ValueTask<TItem?> GetOrCreateAsync<TSuffix>(TSuffix cacheKeySuffix, Func<CancellationToken, ValueTask<TItem?>> factory, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
+    {
+        #region Validations
+
+        ArgumentNullException.ThrowIfNull(cacheKeySuffix, nameof(cacheKeySuffix));
+        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        string source = nameof(GetOrCreateAsync);
+
+        if (IsCacheDisabled(source))
+        {
+            return await factory(cancellationToken);
+        }
+
+        #endregion Validations
+
+        string cacheKey = GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
+
+        #region Initial Cache Check
+
+        TItem? item = await GetSingleItemAsync(source, cacheKey, cancellationToken);
+
+        if (!IsMissing(item))
+        {
+            return item;
+        }
+
+        #endregion Initial Cache Check
+
+        Dictionary<TSuffix, TItem?> missingItems = await LoadMissingItemsAsync(source, [(cacheKeySuffix, cacheKey)], async (_, ct) =>
+        {
+            TItem? freshItem = await factory(ct);
+
+            return new Dictionary<TSuffix, TItem?> { { cacheKeySuffix, freshItem } };
+        }, cancellationToken);
+
+        return missingItems.TryGetValue(cacheKeySuffix, out TItem? loadedItem) ? loadedItem : default;
+    }
+
+    public async ValueTask<IReadOnlyDictionary<TSuffix, TItem?>> GetOrCreateItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, Func<IReadOnlyCollection<TSuffix>, CancellationToken, ValueTask<IReadOnlyDictionary<TSuffix, TItem?>>> factory, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
+    {
+        #region Validations
+
+        ArgumentNullException.ThrowIfNull(cacheKeySuffixes, nameof(cacheKeySuffixes));
+        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        string source = nameof(GetOrCreateItemsAsync);
+
+        TSuffix[] typedSuffixes = [.. cacheKeySuffixes.Distinct()];
+
+        if (typedSuffixes.Length == 0)
+        {
+            LogNoItemsToCacheDebug(source);
+            return new Dictionary<TSuffix, TItem?>();
+        }
+
+        ValidateCacheKeyNullSuffixes(typedSuffixes, nameof(cacheKeySuffixes));
+
+        if (IsCacheDisabled(source))
+        {
+            IReadOnlyDictionary<TSuffix, TItem?> freshItems = await factory(typedSuffixes, cancellationToken);
+
+            Dictionary<TSuffix, TItem?> noCacheResult = new(typedSuffixes.Length);
+            foreach (TSuffix suffix in typedSuffixes)
+            {
+                noCacheResult[suffix] = freshItems.TryGetValue(suffix, out TItem? loadedItem) ? loadedItem : default;
+            }
+
+            return noCacheResult;
+        }
+
+        #endregion Validations
+
+        // Build every key once: the read core and the load share them.
+        Dictionary<string, TItem?> items = [];
+        Dictionary<string, TSuffix> relations = [];
+        foreach (TSuffix suffix in typedSuffixes)
+        {
+            string key = GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, suffix);
+
+            items.Add(key, default);
+            relations.Add(key, suffix);
+        }
+
+        #region Initial Cache Check
+
+        items = await GetManyItemsAsync(source, items, cancellationToken);
+
+        List<(TSuffix Suffix, string Key)> missing = [.. items.Where(w => IsMissing(w.Value)).Select(s => (relations[s.Key], s.Key))];
+
+        Dictionary<TSuffix, TItem?> result = MapCachedItems(items, relations);
+
+        if (missing.Count == 0)
+        {
+            return result;
+        }
+
+        #endregion Initial Cache Check
+
+        Dictionary<TSuffix, TItem?> missingItems = await LoadMissingItemsAsync(source, missing, factory, cancellationToken);
+
+        foreach (KeyValuePair<TSuffix, TItem?> missingItem in missingItems)
+        {
+            result[missingItem.Key] = missingItem.Value;
+        }
+
+        return result;
+    }
+
+    #endregion GetOrCreate
+
+    #endregion Get
+
     #region Set
 
-    public async ValueTask SetAsync(TItem item, string? tenantId = null, CancellationToken cancellationToken = default)
-    {
-        await SetAsync(item, cacheKeySuffix: string.Empty, tenantId: tenantId, cancellationToken: cancellationToken);
-    }
+    public async ValueTask SetAsync(TItem item, string? tenantId = null, CancellationToken cancellationToken = default) => await SetAsync(item, cacheKeySuffix: string.Empty, tenantId: tenantId, cancellationToken: cancellationToken);
 
     [OverloadResolutionPriority(1)]
     public async ValueTask SetAsync<TSuffix>(TItem item, TSuffix cacheKeySuffix, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
     {
+        #region Validations
+
         ArgumentNullException.ThrowIfNull(cacheKeySuffix, nameof(cacheKeySuffix));
         ArgumentNullException.ThrowIfNull(item, nameof(item));
 
@@ -223,37 +237,17 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
             return;
         }
 
+        #endregion Validations
+
         string cacheKey = GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
 
-        if (IsDistributedCacheEnabled(source))
-        {
-            try
-            {
-                ValidateDistributedCache();
-
-                await distributedCacheService!.SetAsync(cacheKey, item, _cacheOptions.DistributedCacheDuration, cancellationToken: cancellationToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                LogDistributedCacheError(source, ex);
-            }
-        }
-
-        if (IsMemoryCacheEnabled(source))
-        {
-            try
-            {
-                SetMemoryCache(cacheKey, item, _cacheOptions.MemoryCacheDuration);
-            }
-            catch (Exception ex)
-            {
-                LogMemoryCacheError(source, ex);
-            }
-        }
+        await SetSingleItemAsync(source, cacheKey, item, cancellationToken);
     }
 
-    public async ValueTask SetItemsAsync<TSuffix>(IDictionary<TSuffix, TItem> items, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
+    public async ValueTask SetItemsAsync<TSuffix>(IReadOnlyDictionary<TSuffix, TItem> items, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
     {
+        #region Validations
+
         ArgumentNullException.ThrowIfNull(items, nameof(items));
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -273,8 +267,10 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
         TSuffix[] typedSuffixes = [.. items.Keys];
 
-        ValidateCacheKeySuffixes(typedSuffixes, nameof(items));
+        ValidateCacheKeyNullSuffixes(typedSuffixes, nameof(items));
         ValidateNullValues(items);
+
+        #endregion Validations
 
         Dictionary<string, TItem> keyedItems = new(items.Count);
         foreach (KeyValuePair<TSuffix, TItem> item in items)
@@ -282,54 +278,20 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
             keyedItems.Add(GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, item.Key), item.Value);
         }
 
-        if (IsDistributedCacheEnabled(source))
-        {
-            try
-            {
-                ValidateDistributedCache();
-
-                await distributedCacheService!.SetItemsAsync(keyedItems, _cacheOptions.DistributedCacheDuration, cancellationToken: cancellationToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                LogDistributedCacheError(source, ex);
-            }
-        }
-
-        if (IsMemoryCacheEnabled(source))
-        {
-            try
-            {
-                MemoryCacheEntryOptions memoryCacheEntryOptions = new()
-                {
-                    SlidingExpiration = null,
-                    AbsoluteExpirationRelativeToNow = _cacheOptions.MemoryCacheDuration
-                };
-
-                foreach (KeyValuePair<string, TItem> item in keyedItems)
-                {
-                    SetMemoryCache(item.Key, item.Value, _cacheOptions.MemoryCacheDuration, memoryCacheEntryOptions: memoryCacheEntryOptions);
-                }
-            }
-            catch (Exception ex)
-            {
-                LogMemoryCacheError(source, ex);
-            }
-        }
+        await SetManyItemsAsync(source, keyedItems, cancellationToken);
     }
 
     #endregion Set
 
     #region Remove
 
-    public async ValueTask RemoveAsync(string? tenantId = null, CancellationToken cancellationToken = default)
-    {
-        await RemoveAsync(cacheKeySuffix: string.Empty, tenantId: tenantId, cancellationToken: cancellationToken);
-    }
+    public async ValueTask RemoveAsync(string? tenantId = null, CancellationToken cancellationToken = default) => await RemoveAsync(cacheKeySuffix: string.Empty, tenantId: tenantId, cancellationToken: cancellationToken);
 
     [OverloadResolutionPriority(1)]
     public async ValueTask RemoveAsync<TSuffix>(TSuffix cacheKeySuffix, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
     {
+        #region Validations
+
         ArgumentNullException.ThrowIfNull(cacheKeySuffix, nameof(cacheKeySuffix));
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -341,7 +303,11 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
             return;
         }
 
+        #endregion Validations
+
         string cacheKey = GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, cacheKeySuffix);
+
+        #region Distributed Cache
 
         if (IsDistributedCacheEnabled(source))
         {
@@ -357,6 +323,10 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
             }
         }
 
+        #endregion Distributed Cache
+
+        #region Memory Cache
+
         if (IsMemoryCacheEnabled(source))
         {
             try
@@ -368,10 +338,14 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
                 LogMemoryCacheError(source, ex);
             }
         }
+
+        #endregion Memory Cache
     }
 
     public async ValueTask RemoveItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
     {
+        #region Validations
+
         ArgumentNullException.ThrowIfNull(cacheKeySuffixes, nameof(cacheKeySuffixes));
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -391,9 +365,13 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
         TSuffix[] typedSuffixes = [.. cacheKeySuffixes.Distinct()];
 
-        ValidateCacheKeySuffixes(typedSuffixes, nameof(cacheKeySuffixes));
+        ValidateCacheKeyNullSuffixes(typedSuffixes, nameof(cacheKeySuffixes));
+
+        #endregion Validations
 
         string[] cacheKeys = [.. typedSuffixes.Select(s => GetCacheKey(_cacheOptions.Scope, tenantId, _cacheOptions.CacheKey, s))];
+
+        #region Distributed Cache
 
         if (IsDistributedCacheEnabled(source))
         {
@@ -409,6 +387,10 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
             }
         }
 
+        #endregion Distributed Cache
+
+        #region Memory Cache
+
         if (IsMemoryCacheEnabled(source))
         {
             try
@@ -423,6 +405,8 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
                 LogMemoryCacheError(source, ex);
             }
         }
+
+        #endregion Memory Cache
     }
 
     #endregion Remove
@@ -511,14 +495,9 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
     #region Validations
 
-    private static void ValidateCacheKeySuffixes<TSuffix>(TSuffix[] cacheKeySuffixes, string source) where TSuffix : notnull
+    private static bool IsMissing(TItem? item)
     {
-        if (cacheKeySuffixes.Length == 0)
-        {
-            throw new ArgumentException($"The {source} cannot be empty", source);
-        }
-
-        ValidateCacheKeyNullSuffixes(cacheKeySuffixes, source);
+        return item is null || item.Equals(default(TItem));
     }
 
     private static void ValidateCacheKeyNullSuffixes<TSuffix>(TSuffix[] cacheKeySuffixes, string source) where TSuffix : notnull
@@ -540,7 +519,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
         }
     }
 
-    private static void ValidateNullValues<TSuffix>(IDictionary<TSuffix, TItem> items) where TSuffix : notnull
+    private static void ValidateNullValues<TSuffix>(IReadOnlyDictionary<TSuffix, TItem> items) where TSuffix : notnull
     {
         IEnumerable<TSuffix> invalidItems = items.Where(w => w.Value == null).Select(s => s.Key);
 
@@ -554,6 +533,368 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
     #endregion Global
 
+    #region Get
+
+    #region Core
+
+    #region GetAsync
+
+    private async ValueTask<TItem?> GetSingleItemAsync(string source, string cacheKey, CancellationToken cancellationToken)
+    {
+        TItem? item = default;
+
+        #region Memory Cache
+
+        if (IsMemoryCacheEnabled(source))
+        {
+            item = GetSingleItem(source, cacheKey);
+        }
+
+        if (!IsMissing(item))
+        {
+            return item;
+        }
+
+        #endregion Memory Cache
+
+        LogNoMemoryItemCachedDebug(source);
+
+        #region Distributed Cache + Memory Backfill
+
+        if (IsDistributedCacheEnabled(source))
+        {
+            item = await GetDistributedSingleAndBackFillAsync(source, cacheKey, cancellationToken);
+        }
+
+        #endregion Distributed Cache + Memory Backfill
+
+        return item;
+    }
+
+    private TItem? GetSingleItem(string source, string cacheKey)
+    {
+        TItem? item = default;
+
+        try
+        {
+            item = memoryCache.Get<TItem>(cacheKey);
+        }
+        catch (Exception ex)
+        {
+            LogMemoryCacheError(source, ex);
+        }
+
+        return item;
+    }
+
+    private async ValueTask<TItem?> GetDistributedSingleAndBackFillAsync(string source, string cacheKey, CancellationToken cancellationToken)
+    {
+        TItem? item = default;
+
+        try
+        {
+            ValidateDistributedCache();
+
+            item = await distributedCacheService!.GetAsync(cacheKey, cancellationToken: cancellationToken);
+
+            if (item == null)
+            {
+                LogNoDistributedItemCachedDebug(source);
+                return item;
+            }
+
+            if (IsMemoryCacheEnabled(source, isWrite: true))
+            {
+                SetMemoryCache(cacheKey, item, _cacheOptions.MemoryCacheDuration);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogDistributedCacheError(source, ex);
+        }
+
+        return item;
+    }
+
+    #endregion GetAsync
+
+    #region GetItemsAsync
+
+    private async ValueTask<Dictionary<string, TItem?>> GetManyItemsAsync(string source, IReadOnlyDictionary<string, TItem?> items, CancellationToken cancellationToken)
+    {
+        Dictionary<string, TItem?> loaded = IsMemoryCacheEnabled(source) ? GetManyItems(source, items) : new(items);
+
+        string[] missedKeysFromMemory = [.. loaded.Where(w => IsMissing(w.Value)).Select(s => s.Key)];
+
+        bool isDistributedCacheEnabled = IsDistributedCacheEnabled(source);
+
+        #region Distributed Cache + Memory Backfill
+
+        if (isDistributedCacheEnabled && missedKeysFromMemory.Length == 0)
+        {
+            LogNoMissedMemoryCacheItemsDebug(source);
+        }
+        else if (isDistributedCacheEnabled && missedKeysFromMemory.Length != 0)
+        {
+            loaded = await GetDistributedManyAndBackFillAsync(source, missedKeysFromMemory, loaded, cancellationToken);
+        }
+
+        #endregion Distributed Cache + Memory Backfill
+
+        return loaded;
+    }
+
+    private Dictionary<string, TItem?> GetManyItems(string source, IReadOnlyDictionary<string, TItem?> items)
+    {
+        Dictionary<string, TItem?> loaded = new(items);
+
+        try
+        {
+            foreach (KeyValuePair<string, TItem?> keyValuePair in items)
+            {
+                loaded[keyValuePair.Key] = memoryCache.Get<TItem>(keyValuePair.Key);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMemoryCacheError(source, ex);
+        }
+
+        return loaded;
+    }
+
+    private async ValueTask<Dictionary<string, TItem?>> GetDistributedManyAndBackFillAsync(string source, string[] missedKeysFromMemory, IReadOnlyDictionary<string, TItem?> items, CancellationToken cancellationToken)
+    {
+        Dictionary<string, TItem?> loaded = new(items);
+
+        try
+        {
+            ValidateDistributedCache();
+
+            Dictionary<string, TItem?> distributedCacheValues = await distributedCacheService!.GetItemsAsync(missedKeysFromMemory.AsReadOnly(), cancellationToken: cancellationToken);
+
+            if (distributedCacheValues.Count == 0)
+            {
+                LogNoDistributedItemCachedDebug(source);
+            }
+            else
+            {
+                bool isMemoryCacheEnabled = IsMemoryCacheEnabled(source, isWrite: true);
+
+                MemoryCacheEntryOptions? memoryCacheEntryOptions = null;
+                if (isMemoryCacheEnabled)
+                {
+                    LogSyncMemoryCacheFromDistributedCacheDebug(source);
+
+                    memoryCacheEntryOptions ??= new()
+                    {
+                        SlidingExpiration = null,
+                        AbsoluteExpirationRelativeToNow = _cacheOptions.MemoryCacheDuration
+                    };
+                }
+
+                foreach (KeyValuePair<string, TItem?> distributedCacheValue in distributedCacheValues)
+                {
+                    if (isMemoryCacheEnabled && distributedCacheValue.Value is not null)
+                    {
+                        SetMemoryCache(distributedCacheValue.Key, distributedCacheValue.Value, _cacheOptions.MemoryCacheDuration, memoryCacheEntryOptions: memoryCacheEntryOptions);
+                    }
+
+                    loaded[distributedCacheValue.Key] = distributedCacheValue.Value;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogDistributedCacheError(source, ex);
+        }
+
+        return loaded;
+    }
+
+    #endregion GetItemsAsync
+
+    #endregion
+
+    #region Load
+
+    private async Task LoadItemsAsync<TSuffix>(string source, LoadScope scope, List<(TSuffix Suffix, string Key, InFlightLoad<TItem> Load)> claimed, Func<IReadOnlyCollection<TSuffix>, CancellationToken, ValueTask<IReadOnlyDictionary<TSuffix, TItem?>>> factory) where TSuffix : notnull
+    {
+        Dictionary<TSuffix, TItem?> results = [];
+        Exception? failure = null;
+
+        try
+        {
+            // Re-check memory: another load may have finished between our miss and our claim.
+            // Not IsMemoryCacheEnabled: the read core already logged "memory disabled" for this call.
+            bool isMemoryCacheOn = _cacheOptions.MemoryCacheDuration != TimeSpan.Zero;
+
+            List<(TSuffix Suffix, string Key)> toLoad = [];
+            foreach ((TSuffix suffix, string key, _) in claimed)
+            {
+                TItem? memoryItem = isMemoryCacheOn ? GetSingleItem(source, key) : default;
+
+                if (IsMissing(memoryItem))
+                {
+                    toLoad.Add((suffix, key));
+                }
+                else
+                {
+                    results[suffix] = memoryItem;
+                }
+            }
+
+            if (toLoad.Count != 0)
+            {
+                TSuffix[] suffixesToLoad = [.. toLoad.Select(s => s.Suffix)];
+
+                // The factory is canceled only when every caller waiting on this load has left.
+                IReadOnlyDictionary<TSuffix, TItem?> loaded = await factory(suffixesToLoad, scope.Token) ?? throw new InvalidOperationException("The factory returned null instead of a dictionary. Return the items found, or an empty dictionary when none exist");
+
+                Dictionary<string, TItem> toStore = [];
+                foreach ((TSuffix suffix, string key) in toLoad)
+                {
+                    if (loaded.TryGetValue(suffix, out TItem? loadedItem) && !IsMissing(loadedItem))
+                    {
+                        results[suffix] = loadedItem;
+                        toStore.Add(key, loadedItem!);
+                    }
+                }
+
+                // The work is already done: store it even if every caller has left in the meantime.
+                if (toStore.Count == 1)
+                {
+                    KeyValuePair<string, TItem> single = toStore.First();
+
+                    await SetSingleItemAsync(source, single.Key, single.Value, CancellationToken.None);
+                }
+                else if (toStore.Count > 1)
+                {
+                    await SetManyItemsAsync(source, toStore, CancellationToken.None);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+
+        scope.Dispose();
+
+        // Remove the entries BEFORE completing them, so a new caller never joins a finished (or failed) load.
+        foreach ((TSuffix suffix, string key, InFlightLoad<TItem> load) in claimed)
+        {
+            _inFlight.TryRemove(new KeyValuePair<string, InFlightLoad<TItem>>(key, load));
+        }
+
+        foreach ((TSuffix suffix, string key, InFlightLoad<TItem> load) in claimed)
+        {
+            if (failure != null)
+            {
+                load.Completion.TrySetException(failure);
+                _ = load.Completion.Task.Exception;
+            }
+            else
+            {
+                load.Completion.TrySetResult(results.GetValueOrDefault(suffix));
+            }
+        }
+    }
+
+    #endregion Load
+
+    #region Load Missing
+
+    private async ValueTask<Dictionary<TSuffix, TItem?>> LoadMissingItemsAsync<TSuffix>(string source, List<(TSuffix Suffix, string Key)> missing, Func<IReadOnlyCollection<TSuffix>, CancellationToken, ValueTask<IReadOnlyDictionary<TSuffix, TItem?>>> factory, CancellationToken cancellationToken) where TSuffix : notnull
+    {
+        List<(TSuffix Suffix, string Key)> unresolved = missing;
+
+        List<(TSuffix Suffix, InFlightLoad<TItem> Load)> loads = []; // the load that produces each key's result
+        List<LoadScope> scopes = []; // scopes this caller started or joined: each is left once, at the end
+
+        try
+        {
+            while (unresolved.Count != 0)
+            {
+                LoadScope batchScope = new();
+                List<(TSuffix Suffix, string Key, InFlightLoad<TItem> Load)> claimed = [];
+                List<(TSuffix Suffix, string Key)> abandoned = [];
+                Dictionary<LoadScope, bool> joinResults = [];
+
+                foreach ((TSuffix Suffix, string Key) pending in unresolved)
+                {
+                    InFlightLoad<TItem> candidate = new(batchScope);
+                    InFlightLoad<TItem> existing = _inFlight.GetOrAdd(pending.Key, candidate);
+
+                    if (ReferenceEquals(existing, candidate))
+                    {
+                        claimed.Add((pending.Suffix, pending.Key, candidate));
+                        loads.Add((pending.Suffix, candidate));
+                        continue;
+                    }
+
+                    // Join each foreign scope only once, however many of its keys we need.
+                    if (!joinResults.TryGetValue(existing.Scope, out bool joined))
+                    {
+                        joined = existing.Scope.TryJoin();
+                        joinResults[existing.Scope] = joined;
+
+                        if (joined)
+                        {
+                            scopes.Add(existing.Scope);
+                        }
+                    }
+
+                    if (joined)
+                    {
+                        loads.Add((pending.Suffix, existing));
+                    }
+                    else
+                    {
+                        // Everyone who wanted that load has left: drop it and claim the key again on the next pass.
+                        _inFlight.TryRemove(new KeyValuePair<string, InFlightLoad<TItem>>(pending.Key, existing));
+                        abandoned.Add(pending);
+                    }
+                }
+
+                if (claimed.Count != 0)
+                {
+                    scopes.Add(batchScope);
+                    _ = LoadItemsAsync(source, batchScope, claimed, factory);
+                }
+                else
+                {
+                    // Nothing was claimed, so nobody else references this scope
+                    batchScope.Dispose();
+                }
+
+                unresolved = abandoned;
+            }
+
+            // Our token only cancels this wait, never the load.
+            await Task.WhenAll(loads.Select(s => (Task)s.Load.Completion.Task)).WaitAsync(cancellationToken);
+
+            Dictionary<TSuffix, TItem?> result = new(loads.Count);
+            foreach ((TSuffix suffix, InFlightLoad<TItem> load) in loads)
+            {
+                result[suffix] = await load.Completion.Task;
+            }
+
+            return result;
+        }
+        finally
+        {
+            foreach (LoadScope scope in scopes)
+            {
+                scope.Leave();
+            }
+        }
+    }
+
+    #endregion Load Missing
+
+    #endregion Get
+
     #region Set
 
     private void SetMemoryCache(string key, TItem item, TimeSpan duration, MemoryCacheEntryOptions? memoryCacheEntryOptions = null)
@@ -566,6 +907,121 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
         memoryCache.Set(key, item, memoryCacheEntryOptions);
     }
+
+    #region Core
+
+    #region SetAsync
+
+    private async ValueTask SetSingleItemAsync(string source, string cacheKey, TItem item, CancellationToken cancellationToken)
+    {
+        #region Distributed Cache
+
+        if (IsDistributedCacheEnabled(source))
+        {
+            await SetDistributedSingleAsync(source, cacheKey, item, cancellationToken);
+        }
+
+        #endregion Distributed Cache
+
+        #region Memory Cache
+
+        if (IsMemoryCacheEnabled(source))
+        {
+            SetSingleItem(source, cacheKey, item);
+        }
+
+        #endregion Memory Cache
+    }
+
+    private void SetSingleItem(string source, string cacheKey, TItem item)
+    {
+        try
+        {
+            SetMemoryCache(cacheKey, item, _cacheOptions.MemoryCacheDuration);
+        }
+        catch (Exception ex)
+        {
+            LogMemoryCacheError(source, ex);
+        }
+    }
+
+    private async Task SetDistributedSingleAsync(string source, string cacheKey, TItem item, CancellationToken cancellationToken)
+    {
+        try
+        {
+            ValidateDistributedCache();
+
+            await distributedCacheService!.SetAsync(cacheKey, item, _cacheOptions.DistributedCacheDuration, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogDistributedCacheError(source, ex);
+        }
+    }
+
+    #endregion SetAsync
+
+    #region SetItemsAsync
+
+    private async ValueTask SetManyItemsAsync(string source, IReadOnlyDictionary<string, TItem> keyedItems, CancellationToken cancellationToken)
+    {
+        #region Distributed Cache
+
+        if (IsDistributedCacheEnabled(source))
+        {
+            await SetDistributedManyAsync(source, keyedItems, cancellationToken);
+        }
+
+        #endregion Distributed Cache
+
+        #region Memory Cache
+
+        if (IsMemoryCacheEnabled(source))
+        {
+            SetManyItems(source, keyedItems);
+        }
+
+        #endregion Memory Cache
+    }
+
+    private void SetManyItems(string source, IReadOnlyDictionary<string, TItem> items)
+    {
+        try
+        {
+            MemoryCacheEntryOptions memoryCacheEntryOptions = new()
+            {
+                SlidingExpiration = null,
+                AbsoluteExpirationRelativeToNow = _cacheOptions.MemoryCacheDuration
+            };
+
+            foreach (KeyValuePair<string, TItem> item in items)
+            {
+                SetMemoryCache(item.Key, item.Value, _cacheOptions.MemoryCacheDuration, memoryCacheEntryOptions: memoryCacheEntryOptions);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMemoryCacheError(source, ex);
+        }
+    }
+
+    private async Task SetDistributedManyAsync(string source, IReadOnlyDictionary<string, TItem> items, CancellationToken cancellationToken)
+    {
+        try
+        {
+            ValidateDistributedCache();
+
+            await distributedCacheService!.SetItemsAsync(items, _cacheOptions.DistributedCacheDuration, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogDistributedCacheError(source, ex);
+        }
+    }
+
+    #endregion SetItemsAsync
+
+    #endregion Core
 
     #endregion Set
 
