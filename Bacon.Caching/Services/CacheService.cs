@@ -134,13 +134,20 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
         {
             TItem? freshItem = await factory(ct);
 
-            return new Dictionary<TSuffix, TItem?> { { cacheKeySuffix, freshItem } };
+            // A null item means no data: leave the key out, like a plural factory does for a suffix it did not find
+            Dictionary<TSuffix, TItem> found = [];
+            if (freshItem is not null)
+            {
+                found.Add(cacheKeySuffix, freshItem);
+            }
+
+            return found;
         }, cancellationToken);
 
         return missingItems.TryGetValue(cacheKeySuffix, out TItem? loadedItem) ? loadedItem : default;
     }
 
-    public async ValueTask<IReadOnlyDictionary<TSuffix, TItem?>> GetOrCreateItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, Func<IReadOnlyCollection<TSuffix>, CancellationToken, ValueTask<IReadOnlyDictionary<TSuffix, TItem?>>> factory, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
+    public async ValueTask<IReadOnlyDictionary<TSuffix, TItem?>> GetOrCreateItemsAsync<TSuffix>(IEnumerable<TSuffix> cacheKeySuffixes, Func<IReadOnlyCollection<TSuffix>, CancellationToken, ValueTask<IReadOnlyDictionary<TSuffix, TItem>>> factory, string? tenantId = null, CancellationToken cancellationToken = default) where TSuffix : notnull
     {
         #region Validations
 
@@ -163,7 +170,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
         if (IsCacheDisabled(source))
         {
-            IReadOnlyDictionary<TSuffix, TItem?> freshItems = await factory(typedSuffixes, cancellationToken);
+            IReadOnlyDictionary<TSuffix, TItem> freshItems = await factory(typedSuffixes, cancellationToken);
 
             Dictionary<TSuffix, TItem?> noCacheResult = new(typedSuffixes.Length);
             foreach (TSuffix suffix in typedSuffixes)
@@ -718,7 +725,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
     #region Load
 
-    private async Task LoadItemsAsync<TSuffix>(string source, LoadScope scope, List<(TSuffix Suffix, string Key, InFlightLoad<TItem> Load)> claimed, Func<IReadOnlyCollection<TSuffix>, CancellationToken, ValueTask<IReadOnlyDictionary<TSuffix, TItem?>>> factory) where TSuffix : notnull
+    private async Task LoadItemsAsync<TSuffix>(string source, LoadScope scope, List<(TSuffix Suffix, string Key, InFlightLoad<TItem> Load)> claimed, Func<IReadOnlyCollection<TSuffix>, CancellationToken, ValueTask<IReadOnlyDictionary<TSuffix, TItem>>> factory) where TSuffix : notnull
     {
         Dictionary<TSuffix, TItem?> results = [];
         Exception? failure = null;
@@ -749,7 +756,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
                 TSuffix[] suffixesToLoad = [.. toLoad.Select(s => s.Suffix)];
 
                 // The factory is canceled only when every caller waiting on this load has left.
-                IReadOnlyDictionary<TSuffix, TItem?> loaded = await factory(suffixesToLoad, scope.Token) ?? throw new InvalidOperationException("The factory returned null instead of a dictionary. Return the items found, or an empty dictionary when none exist");
+                IReadOnlyDictionary<TSuffix, TItem> loaded = await factory(suffixesToLoad, scope.Token) ?? throw new InvalidOperationException("The factory returned null instead of a dictionary. Return the items found, or an empty dictionary when none exist");
 
                 Dictionary<string, TItem> toStore = [];
                 foreach ((TSuffix suffix, string key) in toLoad)
@@ -805,7 +812,7 @@ internal sealed partial class CacheService<TItem>(IOptions<CacheServerOptions> c
 
     #region Load Missing
 
-    private async ValueTask<Dictionary<TSuffix, TItem?>> LoadMissingItemsAsync<TSuffix>(string source, List<(TSuffix Suffix, string Key)> missing, Func<IReadOnlyCollection<TSuffix>, CancellationToken, ValueTask<IReadOnlyDictionary<TSuffix, TItem?>>> factory, CancellationToken cancellationToken) where TSuffix : notnull
+    private async ValueTask<Dictionary<TSuffix, TItem?>> LoadMissingItemsAsync<TSuffix>(string source, List<(TSuffix Suffix, string Key)> missing, Func<IReadOnlyCollection<TSuffix>, CancellationToken, ValueTask<IReadOnlyDictionary<TSuffix, TItem>>> factory, CancellationToken cancellationToken) where TSuffix : notnull
     {
         List<(TSuffix Suffix, string Key)> unresolved = missing;
 

@@ -136,7 +136,7 @@ public class WeatherForecastController(ICacheService<WeatherForecast> weatherFor
             async ct => await FetchFromSourceAsync(ct),
             cancellationToken: cancellationToken);
 
-        return forecast ?? throw new InvalidOperationException("No forecast available");
+        return forecast ?? throw new KeyNotFoundException("No forecast available");
     }
 }
 ```
@@ -202,14 +202,14 @@ WeatherForecast? other = await weatherForecastCacheService.GetOrCreateAsync(
     cancellationToken: cancellationToken);
 ```
 
-The factory is where you call your database (or any other source) and build the final object: whatever it returns is what gets cached. It returns `null` when the item does not exist.
+The factory is where you call your database (or any other source) and build the final object: whatever it returns is what gets cached. It should only load what it is asked for and return `null` when the source has no data (for example a query that returned no row): the validation happens outside the cache. `GetOrCreateAsync` then returns `null`, which means the item was found in neither the memory cache, the distributed cache nor the source; what to do about it (throw a not-found exception, return a 404, ...) is up to you.
 
 **Stampede protection.** When a popular key expires, every concurrent request would reach your source. Here, concurrent misses for the same key share one call to the factory, and every caller receives its result:
 
 - A cache hit never touches this mechanism: it is as cheap as `GetAsync`.
 - **Cancellation.** Your `CancellationToken` only cancels *your* wait. The token passed to the factory is shared by every caller waiting on the load and is canceled only when all of them have canceled, so pass it to your database call. A factory that ignores it runs to completion and its result is still cached.
 - **Failures.** If the factory throws, every caller waiting on that load receives the exception (it is not logged), nothing is cached, and the next call tries again.
-- **Not found.** A `null` result is returned and **not cached**, so repeated requests for a missing key reach your source every time. Throw after the call if a missing item is an error for you.
+- **Not found.** A `null` result is returned and **not cached**, so repeated requests for a missing key reach your source every time. Validate the result after the call and throw there if a missing item is an error for you. Throwing from the factory is possible, but then every caller waiting on the load receives the exception.
 - **Scope.** The protection is per process. With several nodes a hot key can still be loaded once per node when it expires, which is far fewer than once per request.
 - The factory of the first caller runs on behalf of everyone waiting on the same key, so do not capture request-scoped objects in it (resolve what it needs from a singleton, or inside the factory).
 - If both layers are disabled for the type, the factory is simply called every time.
@@ -247,7 +247,7 @@ int[] days = [1, 2, 3, 4, 5];
 
 IReadOnlyDictionary<int, WeatherForecast?> forecasts = await weatherForecastCacheService.GetOrCreateItemsAsync(
     days,
-    async (missingDays, ct) => await repository.LoadForecastsAsync(missingDays, ct),   // returns IReadOnlyDictionary<int, WeatherForecast?>
+    async (missingDays, ct) => await repository.LoadForecastsAsync(missingDays, ct),   // returns the rows found as IReadOnlyDictionary<int, WeatherForecast>
     cancellationToken: cancellationToken);
 
 // The result has one entry per distinct suffix: null when the item exists nowhere
@@ -259,7 +259,7 @@ if (notFound.Length != 0)
 }
 ```
 
-- With 100 suffixes of which 90 are cached, the factory receives the 10 missing ones. The factory returns the items it found keyed by suffix; a suffix it leaves out, or returns with a `null` value, is considered not found. Not-found items are not cached.
+- With 100 suffixes of which 90 are cached, the factory receives the 10 missing ones. The factory returns the items it found keyed by suffix; a suffix it leaves out is considered not found (the values cannot be `null`). Not-found items are not cached and come back as `null` in the result, which means no data was found in the memory cache, the distributed cache or the factory, while the items found are cached.
 - **Check for missing items after the call, not inside the factory.** Throwing from the factory fails the whole batch: the items that were found are not cached and every waiting caller receives the exception.
 - Concurrent callers share the loads per key, even when their suffixes only overlap: caller A asking for days 1–3 and caller B asking for days 3–5 load day 3 once. The factory may therefore receive fewer suffixes than were missing for the call, or not be called at all when everything is cached or already being loaded by someone else. Loads started by `GetOrCreateAsync` are shared in the same way.
 - Cancellation, failures, the per-process scope and the advice about request-scoped objects are the same as for `GetOrCreateAsync`. A factory that returns `null` instead of a dictionary fails the load with an `InvalidOperationException`.

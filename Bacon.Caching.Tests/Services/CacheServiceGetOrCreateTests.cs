@@ -55,7 +55,7 @@ internal sealed class CacheServiceGetOrCreateTests
 
     private static ValueTask<TestItem?> Created(TestItem item) => ValueTask.FromResult<TestItem?>(item);
 
-    private static ValueTask<IReadOnlyDictionary<string, TestItem?>> Found(Dictionary<string, TestItem?> items) => ValueTask.FromResult<IReadOnlyDictionary<string, TestItem?>>(items);
+    private static ValueTask<IReadOnlyDictionary<string, TestItem>> Found(Dictionary<string, TestItem> items) => ValueTask.FromResult<IReadOnlyDictionary<string, TestItem>>(items);
 
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
@@ -151,7 +151,7 @@ internal sealed class CacheServiceGetOrCreateTests
     /// </summary>
     private sealed class GatedBatchFactory(bool observeToken = false)
     {
-        private readonly List<GatedCall<IReadOnlyDictionary<string, TestItem?>>> _calls = [];
+        private readonly List<GatedCall<IReadOnlyDictionary<string, TestItem>>> _calls = [];
         private readonly List<string[]> _requests = [];
         private readonly Lock _gate = new();
 
@@ -176,13 +176,13 @@ internal sealed class CacheServiceGetOrCreateTests
 
         public bool WasCanceled(int call) => Get(call).IsCanceled;
 
-        public void Release(int call, Dictionary<string, TestItem?> items) => Get(call).Completion.TrySetResult(items);
+        public void Release(int call, Dictionary<string, TestItem> items) => Get(call).Completion.TrySetResult(items);
 
         public void Fail(int call, Exception exception) => Get(call).Completion.TrySetException(exception);
 
-        public async ValueTask<IReadOnlyDictionary<string, TestItem?>> InvokeAsync(IReadOnlyCollection<string> suffixes, CancellationToken token)
+        public async ValueTask<IReadOnlyDictionary<string, TestItem>> InvokeAsync(IReadOnlyCollection<string> suffixes, CancellationToken token)
         {
-            GatedCall<IReadOnlyDictionary<string, TestItem?>> call = new();
+            GatedCall<IReadOnlyDictionary<string, TestItem>> call = new();
 
             lock (_gate)
             {
@@ -205,7 +205,7 @@ internal sealed class CacheServiceGetOrCreateTests
             }
         }
 
-        private GatedCall<IReadOnlyDictionary<string, TestItem?>> Get(int call)
+        private GatedCall<IReadOnlyDictionary<string, TestItem>> Get(int call)
         {
             lock (_gate)
             {
@@ -679,7 +679,7 @@ internal sealed class CacheServiceGetOrCreateTests
         {
             requests.Add([.. requested]);
 
-            return Found(requested.ToDictionary(s => s, s => (TestItem?)Item(s)));
+            return Found(requested.ToDictionary(s => s, s => Item(s)));
         });
 
         using (Assert.EnterMultipleScope())
@@ -704,7 +704,7 @@ internal sealed class CacheServiceGetOrCreateTests
         await sut.SetAsync(Item("Existing"), "id1");
         string[] suffixes = ["id1", "id2"];
 
-        IReadOnlyDictionary<string, TestItem?> result = await sut.GetOrCreateItemsAsync(suffixes, (IReadOnlyCollection<string> requested, CancellationToken _) => Found(requested.ToDictionary(s => s, s => (TestItem?)Item(s))));
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetOrCreateItemsAsync(suffixes, (IReadOnlyCollection<string> requested, CancellationToken _) => Found(requested.ToDictionary(s => s, s => Item(s))));
 
         using (Assert.EnterMultipleScope())
         {
@@ -769,7 +769,7 @@ internal sealed class CacheServiceGetOrCreateTests
         {
             requests.Add([.. requested]);
 
-            return Found(requested.ToDictionary(s => s, s => (TestItem?)Item(s)));
+            return Found(requested.ToDictionary(s => s, s => Item(s)));
         });
 
         using (Assert.EnterMultipleScope())
@@ -787,11 +787,11 @@ internal sealed class CacheServiceGetOrCreateTests
         List<string[]> requests = [];
         string[] suffixes = ["id1", "id2"];
 
-        Func<IReadOnlyCollection<string>, CancellationToken, ValueTask<IReadOnlyDictionary<string, TestItem?>>> factory = (requested, _) =>
+        Func<IReadOnlyCollection<string>, CancellationToken, ValueTask<IReadOnlyDictionary<string, TestItem>>> factory = (requested, _) =>
         {
             requests.Add([.. requested]);
 
-            return Found(requested.Where(s => s == "id1").ToDictionary(s => s, s => (TestItem?)Item(s)));
+            return Found(requested.Where(s => s == "id1").ToDictionary(s => s, s => Item(s)));
         };
 
         IReadOnlyDictionary<string, TestItem?> first = await sut.GetOrCreateItemsAsync(suffixes, factory);
@@ -816,7 +816,7 @@ internal sealed class CacheServiceGetOrCreateTests
         CacheService<TestItem> sut = CreateService();
         string[] suffixes = ["id1", "id2"];
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => sut.GetOrCreateItemsAsync(suffixes, (IReadOnlyCollection<string> requested, CancellationToken _) => ValueTask.FromResult<IReadOnlyDictionary<string, TestItem?>>(null!)).AsTask());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => sut.GetOrCreateItemsAsync(suffixes, (IReadOnlyCollection<string> requested, CancellationToken _) => ValueTask.FromResult<IReadOnlyDictionary<string, TestItem>>(null!)).AsTask());
 
         using (Assert.EnterMultipleScope())
         {
@@ -836,7 +836,7 @@ internal sealed class CacheServiceGetOrCreateTests
         Assert.That(exception.Message, Is.EqualTo("boom"));
         Assert.That(_fakeDistCache.Contains(Key("id1")), Is.False);
 
-        IReadOnlyDictionary<string, TestItem?> retry = await sut.GetOrCreateItemsAsync(suffixes, (IReadOnlyCollection<string> requested, CancellationToken _) => Found(requested.ToDictionary(s => s, s => (TestItem?)Item(s))));
+        IReadOnlyDictionary<string, TestItem?> retry = await sut.GetOrCreateItemsAsync(suffixes, (IReadOnlyCollection<string> requested, CancellationToken _) => Found(requested.ToDictionary(s => s, s => Item(s))));
 
         Assert.That(retry, Has.Count.EqualTo(2));
     }
@@ -866,8 +866,8 @@ internal sealed class CacheServiceGetOrCreateTests
             Assert.That(factory.RequestOf(1), Is.EquivalentTo(["c"]));
         }
 
-        factory.Release(0, new Dictionary<string, TestItem?> { ["a"] = itemA, ["b"] = itemB });
-        factory.Release(1, new Dictionary<string, TestItem?> { ["c"] = itemC });
+        factory.Release(0, new Dictionary<string, TestItem> { ["a"] = itemA, ["b"] = itemB });
+        factory.Release(1, new Dictionary<string, TestItem> { ["c"] = itemC });
 
         IReadOnlyDictionary<string, TestItem?> resultOne = await WithinAsync(callerOne);
         IReadOnlyDictionary<string, TestItem?> resultTwo = await WithinAsync(callerTwo);
@@ -894,7 +894,7 @@ internal sealed class CacheServiceGetOrCreateTests
 
         await WaitUntilAsync(() => factory.Calls == 1);
 
-        factory.Release(0, new Dictionary<string, TestItem?> { ["a"] = itemA, ["b"] = itemB });
+        factory.Release(0, new Dictionary<string, TestItem> { ["a"] = itemA, ["b"] = itemB });
 
         IReadOnlyDictionary<string, TestItem?>[] results = await WithinAsync(Task.WhenAll(callers));
 
@@ -927,7 +927,7 @@ internal sealed class CacheServiceGetOrCreateTests
         Assert.That(batch.RequestOf(0), Is.EquivalentTo(["b"]));
 
         single.Release(0, itemA);
-        batch.Release(0, new Dictionary<string, TestItem?> { ["b"] = itemB });
+        batch.Release(0, new Dictionary<string, TestItem> { ["b"] = itemB });
 
         IReadOnlyDictionary<string, TestItem?> result = await WithinAsync(batchCaller);
 
@@ -985,13 +985,13 @@ internal sealed class CacheServiceGetOrCreateTests
 
         await WaitUntilAsync(() => factory.Calls == 2);
 
-        factory.Release(1, new Dictionary<string, TestItem?> { ["a"] = fresh });
+        factory.Release(1, new Dictionary<string, TestItem> { ["a"] = fresh });
 
         IReadOnlyDictionary<string, TestItem?> result = await WithinAsync(newCaller);
 
         Assert.That(result["a"], Is.SameAs(fresh));
 
-        factory.Release(0, new Dictionary<string, TestItem?> { ["a"] = abandoned });
+        factory.Release(0, new Dictionary<string, TestItem> { ["a"] = abandoned });
     }
 
     [Test]
@@ -1005,7 +1005,7 @@ internal sealed class CacheServiceGetOrCreateTests
         {
             requests.Add([.. requested]);
 
-            return Found(requested.Where(s => s == "id1").ToDictionary(s => s, s => (TestItem?)Item(s)));
+            return Found(requested.Where(s => s == "id1").ToDictionary(s => s, s => Item(s)));
         });
 
         using (Assert.EnterMultipleScope())
@@ -1026,7 +1026,7 @@ internal sealed class CacheServiceGetOrCreateTests
         _fakeDistCache.FailWith = new InvalidOperationException("redis down");
         string[] suffixes = ["id1", "id2"];
 
-        IReadOnlyDictionary<string, TestItem?> result = await sut.GetOrCreateItemsAsync(suffixes, (IReadOnlyCollection<string> requested, CancellationToken _) => Found(requested.ToDictionary(s => s, s => (TestItem?)Item(s))));
+        IReadOnlyDictionary<string, TestItem?> result = await sut.GetOrCreateItemsAsync(suffixes, (IReadOnlyCollection<string> requested, CancellationToken _) => Found(requested.ToDictionary(s => s, s => Item(s))));
 
         using (Assert.EnterMultipleScope())
         {
@@ -1097,7 +1097,7 @@ internal sealed class CacheServiceGetOrCreateTests
         CacheService<TestItem> sut = CreateService();
         FixedSuffix[] suffixes = [new FixedSuffix("x"), new FixedSuffix("x")];
 
-        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetOrCreateItemsAsync(suffixes, (IReadOnlyCollection<FixedSuffix> requested, CancellationToken _) => ValueTask.FromResult<IReadOnlyDictionary<FixedSuffix, TestItem?>>(new Dictionary<FixedSuffix, TestItem?>())).AsTask());
+        await Assert.ThrowsAsync<ArgumentException>(() => sut.GetOrCreateItemsAsync(suffixes, (IReadOnlyCollection<FixedSuffix> requested, CancellationToken _) => ValueTask.FromResult<IReadOnlyDictionary<FixedSuffix, TestItem>>(new Dictionary<FixedSuffix, TestItem>())).AsTask());
     }
 
     [Test]
